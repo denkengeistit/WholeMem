@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "wholemem": {
+      "command": "wholemem-mcp",
+      "args": [],
+      "env": {
+        "WHOLEMEM_SCREENPIPE_URL": "${WHOLEMEM_SCREENPIPE_URL}",
+        "WHOLEMEM_LLM_BASE_URL": "${WHOLEMEM_LLM_BASE_URL}",
+        "WHOLEMEM_LLM_MODEL": "${WHOLEMEM_LLM_MODEL}",
+        "WHOLEMEM_LLM_API_KEY": "${WHOLEMEM_LLM_API_KEY}",
+        "WHOLEMEM_OBSIDIAN_VAULT_PATH": "${WHOLEMEM_OBSIDIAN_VAULT_PATH}"
+      }
+    }
+  }
+}

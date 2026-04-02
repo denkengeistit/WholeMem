@@ -1,0 +1,30 @@
+# WholeMem MCP Configuration
+# Copy to config.yaml and adjust to your setup.
+# Environment variables override these values (prefix: WHOLEMEM_).
+
+screenpipe:
+  url: "http://localhost:3030"
+
+llm:
+  # OpenAI-compatible endpoint (LM Studio, vLLM, Ollama /v1, etc.)
+  base_url: "http://localhost:1234/v1"
+  model: "qwen3-1.7b"
+  api_key: "lm-studio"          # most local servers accept any string
+
+embedder:
+  # "ollama" or "openai" (for any OpenAI-compatible embedding endpoint)
+  provider: "ollama"
+  model: "nomic-embed-text"
+  base_url: "http://localhost:11434"  # Ollama default
+  # embedding_dims: 768               # uncomment if your model differs
+
+mem0:
+  user_id: "default_user"
+  # qdrant_path: "~/.wholemem/qdrant"  # on-disk vector store
+
+obsidian:
+  vault_path: "~/Documents/Obsidian"
+  daily_notes_subfolder: "Daily Notes"  # relative to vault_path
+
+daemon:
+  interval_minutes: 15
