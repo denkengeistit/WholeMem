@@ -1,14 +1,18 @@
 {
   "mcpServers": {
     "wholemem": {
-      "command": "wholemem-mcp",
+      "command": "/Users/andme/Scratch/wholemem/.venv/bin/wholemem-mcp",
       "args": [],
       "env": {
-        "WHOLEMEM_SCREENPIPE_URL": "${WHOLEMEM_SCREENPIPE_URL}",
-        "WHOLEMEM_LLM_BASE_URL": "${WHOLEMEM_LLM_BASE_URL}",
-        "WHOLEMEM_LLM_MODEL": "${WHOLEMEM_LLM_MODEL}",
-        "WHOLEMEM_LLM_API_KEY": "${WHOLEMEM_LLM_API_KEY}",
-        "WHOLEMEM_OBSIDIAN_VAULT_PATH": "${WHOLEMEM_OBSIDIAN_VAULT_PATH}"
+        "WHOLEMEM_LLM_BASE_URL": "http://192.168.3.2:1234/v1",
+        "WHOLEMEM_LLM_MODEL": "qwen/qwen3-4b-2507",
+        "WHOLEMEM_LLM_API_KEY": "lm-studio",
+        "WHOLEMEM_EMBEDDER_PROVIDER": "openai",
+        "WHOLEMEM_EMBEDDER_MODEL": "text-embedding-nomic-embed-text-v2-moe",
+        "WHOLEMEM_EMBEDDER_BASE_URL": "http://192.168.3.2:1234/v1",
+        "WHOLEMEM_OBSIDIAN_VAULT_PATH": "/Users/andme/Scratch/",
+        "WHOLEMEM_OBSIDIAN_DAILY_SUBFOLDER": "wholemem_data",
+        "WHOLEMEM_SCREENPIPE_MANAGED": "false"
       }
     }
   }

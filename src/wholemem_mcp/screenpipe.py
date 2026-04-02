@@ -1,14 +1,107 @@
-"""Async client for the Screenpipe local REST API (localhost:3030)."""
+"""Async client for the Screenpipe local REST API and process manager."""
 
 from __future__ import annotations
 
+import asyncio
+import logging
+import shlex
+import signal
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlparse
 
 import httpx
 
 from wholemem_mcp.config import ScreenpipeConfig
 
+logger = logging.getLogger("wholemem.screenpipe")
+
+
+# ---------------------------------------------------------------------------
+# Process manager — starts / stops the Screenpipe recording process
+# ---------------------------------------------------------------------------
+
+class ScreenpipeProcess:
+    """Manage the Screenpipe recording subprocess."""
+
+    def __init__(self, config: ScreenpipeConfig) -> None:
+        self._cfg = config
+        self._process: Optional[asyncio.subprocess.Process] = None
+
+    def _build_args(self) -> List[str]:
+        """Build the argument list for the Screenpipe subprocess."""
+        parts = shlex.split(self._cfg.command)
+        args = [*parts, "record"]
+
+        # Extract port from the configured URL
+        parsed = urlparse(self._cfg.url)
+        port = parsed.port or 3030
+        args.extend(["--port", str(port)])
+
+        if self._cfg.disable_telemetry:
+            args.append("--disable-telemetry")
+
+        return args
+
+    async def start(self, timeout: float = 30.0) -> None:
+        """Launch Screenpipe and wait until its /health endpoint responds."""
+        args = self._build_args()
+        logger.info("Starting Screenpipe: %s", " ".join(args))
+
+        self._process = await asyncio.create_subprocess_exec(
+            *args,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE,
+        )
+
+        # Poll /health until ready
+        health_url = f"{self._cfg.url.rstrip('/')}/health"
+        deadline = asyncio.get_event_loop().time() + timeout
+        while asyncio.get_event_loop().time() < deadline:
+            # Check the process hasn't crashed
+            if self._process.returncode is not None:
+                stderr = b""
+                if self._process.stderr:
+                    stderr = await self._process.stderr.read()
+                raise RuntimeError(
+                    f"Screenpipe exited with code {self._process.returncode}: "
+                    f"{stderr.decode(errors='replace')[:500]}"
+                )
+            try:
+                async with httpx.AsyncClient(timeout=2.0) as client:
+                    resp = await client.get(health_url)
+                    if resp.status_code == 200:
+                        logger.info("Screenpipe is ready (pid %d).", self._process.pid)
+                        return
+            except (httpx.ConnectError, httpx.TimeoutException):
+                pass
+            await asyncio.sleep(1.0)
+
+        # Timed out — kill the process we started
+        await self.stop()
+        raise TimeoutError(
+            f"Screenpipe did not become ready within {timeout}s"
+        )
+
+    async def stop(self) -> None:
+        """Terminate the Screenpipe subprocess gracefully."""
+        if self._process is None or self._process.returncode is not None:
+            return
+
+        logger.info("Stopping Screenpipe (pid %d)...", self._process.pid)
+        self._process.send_signal(signal.SIGINT)
+        try:
+            await asyncio.wait_for(self._process.wait(), timeout=10.0)
+        except asyncio.TimeoutError:
+            logger.warning("Screenpipe did not exit in time, killing.")
+            self._process.kill()
+            await self._process.wait()
+        logger.info("Screenpipe stopped.")
+
+
+# ---------------------------------------------------------------------------
+# REST API client
+# ---------------------------------------------------------------------------
 
 class ScreenpipeClient:
     """Thin async wrapper around Screenpipe's REST endpoints."""

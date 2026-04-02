@@ -20,6 +20,9 @@ from pydantic import BaseModel, Field
 
 class ScreenpipeConfig(BaseModel):
     url: str = Field(default="http://localhost:3030", description="Screenpipe REST API base URL")
+    managed: bool = Field(default=True, description="Start/stop Screenpipe process with the MCP server")
+    command: str = Field(default="npx screenpipe@latest", description="Command to launch Screenpipe")
+    disable_telemetry: bool = Field(default=True, description="Pass --disable-telemetry to Screenpipe")
 
 
 class LLMConfig(BaseModel):
@@ -31,9 +34,9 @@ class LLMConfig(BaseModel):
 
 
 class EmbedderConfig(BaseModel):
-    provider: str = Field(default="ollama", description="'ollama' or 'openai'")
+    provider: str = Field(default="openai", description="'openai' (any OpenAI-compatible endpoint) or 'ollama'")
     model: str = Field(default="nomic-embed-text", description="Embedding model name")
-    base_url: str = Field(default="http://localhost:11434", description="Embedder server URL")
+    base_url: str = Field(default="http://localhost:1234/v1", description="Embedder server URL (OpenAI-compatible)")
     embedding_dims: int = Field(default=768, description="Embedding vector dimensions")
 
 
@@ -84,6 +87,9 @@ def _env_overrides(cfg: WholeMemConfig) -> WholeMemConfig:
     """Apply WHOLEMEM_* environment variable overrides."""
     env_map = {
         "WHOLEMEM_SCREENPIPE_URL": ("screenpipe", "url"),
+        "WHOLEMEM_SCREENPIPE_MANAGED": ("screenpipe", "managed"),
+        "WHOLEMEM_SCREENPIPE_COMMAND": ("screenpipe", "command"),
+        "WHOLEMEM_SCREENPIPE_DISABLE_TELEMETRY": ("screenpipe", "disable_telemetry"),
         "WHOLEMEM_LLM_BASE_URL": ("llm", "base_url"),
         "WHOLEMEM_LLM_MODEL": ("llm", "model"),
         "WHOLEMEM_LLM_API_KEY": ("llm", "api_key"),
@@ -102,9 +108,11 @@ def _env_overrides(cfg: WholeMemConfig) -> WholeMemConfig:
     for env_key, (section, field) in env_map.items():
         val = os.environ.get(env_key)
         if val is not None:
-            # Coerce int fields
+            # Coerce typed fields
             target_type = type(data[section][field])
-            if target_type is int:
+            if target_type is bool:
+                val = val.lower() in ("true", "1", "yes")
+            elif target_type is int:
                 val = int(val)
             elif target_type is float:
                 val = float(val)

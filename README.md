@@ -37,8 +37,7 @@ A background task runs every 15 minutes (configurable):
 | Component | Purpose | Install |
 |-----------|---------|----------|
 | **Screenpipe** | Screen + audio capture | `npx screenpipe@latest record` or [desktop app](https://screenpi.pe) |
-| **Ollama** | Local embeddings | `curl -fsSL https://ollama.com/install.sh \| sh` then `ollama pull nomic-embed-text` |
-| **LM Studio / vLLM / Ollama** | Summarization LLM | Any OpenAI-compatible server with a small model (e.g. Qwen3-1.7B) |
+| **LM Studio / vLLM / Ollama** | Summarization + embeddings | Any OpenAI-compatible server with a chat model (e.g. Qwen3-1.7B) and an embedding model (e.g. nomic-embed-text) |
 | **Python 3.10+** | Runtime | System package manager |
 | **Obsidian** (optional) | Daily notes viewer | [obsidian.md](https://obsidian.md) |
 
@@ -76,9 +75,9 @@ llm:
   api_key: "lm-studio"                   # local servers accept any string
 
 embedder:
-  provider: "ollama"                      # or "openai" for any compatible endpoint
+  provider: "openai"                      # any OpenAI-compatible endpoint (or "ollama")
   model: "nomic-embed-text"
-  base_url: "http://localhost:11434"
+  base_url: "http://localhost:1234/v1"    # same server as the LLM
   # embedding_dims: 768
 
 mem0:
@@ -200,7 +199,7 @@ llm:
 ## Privacy
 
 - **All data stays local** — Screenpipe captures, mem0 vectors, Obsidian notes, and LLM inference all run on your machine
-- **No cloud APIs required** — works entirely offline with Ollama
+- **No cloud APIs required** — works entirely offline with a local inference server
 - **No telemetry** — WholeMem sends no data anywhere
 - **You own your data** — everything is stored in standard formats (SQLite, Qdrant, Markdown) that you can inspect, export, or delete at any time
 

@@ -22,7 +22,7 @@ from wholemem_mcp.config import WholeMemConfig, load_config
 from wholemem_mcp.daemon import run_daemon, trigger_sync
 from wholemem_mcp.memory import MemoryStore
 from wholemem_mcp.obsidian import ObsidianWriter
-from wholemem_mcp.screenpipe import ScreenpipeClient
+from wholemem_mcp.screenpipe import ScreenpipeClient, ScreenpipeProcess
 from wholemem_mcp.summarizer import Summarizer
 
 # ---------------------------------------------------------------------------
@@ -45,6 +45,12 @@ logger = logging.getLogger("wholemem")
 async def app_lifespan(server: FastMCP) -> AsyncIterator[Dict[str, Any]]:
     """Initialise all WholeMem components and start the background daemon."""
     cfg = load_config()
+
+    # Start managed Screenpipe process if configured
+    sp_process: ScreenpipeProcess | None = None
+    if cfg.screenpipe.managed:
+        sp_process = ScreenpipeProcess(cfg.screenpipe)
+        await sp_process.start()
 
     screenpipe = ScreenpipeClient(cfg.screenpipe)
     summarizer = Summarizer(cfg.llm)
@@ -74,6 +80,12 @@ async def app_lifespan(server: FastMCP) -> AsyncIterator[Dict[str, Any]]:
         except asyncio.CancelledError:
             pass
         logger.info("WholeMem daemon stopped.")
+
+        memory.close()
+        logger.info("mem0 store closed.")
+
+        if sp_process is not None:
+            await sp_process.stop()
 
 
 # ---------------------------------------------------------------------------

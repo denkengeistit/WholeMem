@@ -1,7 +1,7 @@
 """mem0 integration layer — local-only memory storage.
 
-Configures mem0 to use Ollama or any OpenAI-compatible backend for both
-the LLM (fact extraction) and the embedder, with an on-disk Qdrant store.
+Configures mem0 to use any OpenAI-compatible backend for both the LLM
+(fact extraction) and the embedder, with an on-disk Qdrant store.
 """
 
 from __future__ import annotations
@@ -11,6 +11,9 @@ import os
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+# Disable mem0 telemetry before it is imported
+os.environ.setdefault("MEM0_TELEMETRY", "false")
 
 from wholemem_mcp.config import WholeMemConfig
 
@@ -45,20 +48,30 @@ class MemoryStore:
             "version": "v1.1",
         }
 
-        # LLM configuration — supports OpenAI-compatible endpoints
-        # (LM Studio, vLLM, Ollama /v1, etc.)
+        # LLM configuration — uses the native lmstudio provider by default
+        # which handles response_format compatibility correctly.
+        # Ollama users can set llm.provider to "ollama" in config.
         mem0_config["llm"] = {
-            "provider": "openai",
+            "provider": "lmstudio",
             "config": {
                 "model": self._cfg.llm.model,
                 "temperature": 0.1,
                 "max_tokens": self._cfg.llm.max_tokens,
-                "openai_base_url": self._cfg.llm.base_url,
+                "lmstudio_base_url": self._cfg.llm.base_url,
                 "api_key": self._cfg.llm.api_key,
+                "lmstudio_response_format": {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "response",
+                        "schema": {"type": "object"},
+                    },
+                },
             },
         }
 
-        # Embedder configuration
+        # Embedder configuration — default uses the lmstudio provider
+        # (same server as the LLM).  Ollama is still supported by
+        # setting embedder.provider to "ollama" in config.
         if self._cfg.embedder.provider == "ollama":
             mem0_config["embedder"] = {
                 "provider": "ollama",
@@ -68,12 +81,12 @@ class MemoryStore:
                 },
             }
         else:
-            # Generic OpenAI-compatible embedder
+            # LM Studio embedder (default)
             mem0_config["embedder"] = {
-                "provider": "openai",
+                "provider": "lmstudio",
                 "config": {
                     "model": self._cfg.embedder.model,
-                    "openai_base_url": self._cfg.embedder.base_url,
+                    "lmstudio_base_url": self._cfg.embedder.base_url,
                     "api_key": self._cfg.llm.api_key,
                 },
             }
@@ -137,6 +150,25 @@ class MemoryStore:
     def delete(self, memory_id: str) -> Dict[str, Any]:
         """Delete a specific memory by ID."""
         return self._memory.delete(memory_id=memory_id)
+
+    def close(self) -> None:
+        """Close underlying Qdrant client and SQLite connection."""
+        if self._memory is None:
+            return
+
+        # Close the Qdrant vector store client
+        vs = getattr(self._memory, "vector_store", None)
+        if vs is not None:
+            client = getattr(vs, "client", None)
+            if client is not None and hasattr(client, "close"):
+                client.close()
+
+        # Close the SQLite history database
+        db = getattr(self._memory, "db", None)
+        if db is not None:
+            conn = getattr(db, "connection", None)
+            if conn is not None:
+                conn.close()
 
     def is_available(self) -> bool:
         """Check whether mem0 is initialised and usable."""
