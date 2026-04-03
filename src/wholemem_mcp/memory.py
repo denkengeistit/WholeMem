@@ -32,18 +32,25 @@ class MemoryStore:
 
     def _init_memory(self) -> Any:
         """Build a mem0 Memory instance from the WholeMem config."""
-        qdrant_path = str(Path(self._cfg.mem0.qdrant_path).expanduser())
-        os.makedirs(qdrant_path, exist_ok=True)
-
         # Build the mem0 config dict ----------------------------------
+        qdrant_config: Dict[str, Any] = {
+            "collection_name": "wholemem",
+            "embedding_model_dims": self._cfg.embedder.embedding_dims,
+        }
+
+        if self._cfg.mem0.qdrant_url:
+            # Client/server mode — supports concurrent access
+            qdrant_config["url"] = self._cfg.mem0.qdrant_url
+        else:
+            # Embedded mode — single process only (file lock)
+            qdrant_path = str(Path(self._cfg.mem0.qdrant_path).expanduser())
+            os.makedirs(qdrant_path, exist_ok=True)
+            qdrant_config["path"] = qdrant_path
+
         mem0_config: Dict[str, Any] = {
             "vector_store": {
                 "provider": "qdrant",
-                "config": {
-                    "collection_name": "wholemem",
-                    "path": qdrant_path,
-                    "embedding_model_dims": self._cfg.embedder.embedding_dims,
-                },
+                "config": qdrant_config,
             },
             "version": "v1.1",
         }

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import shlex
 import signal
 from datetime import datetime, timedelta, timezone
@@ -48,10 +49,12 @@ class ScreenpipeProcess:
         args = self._build_args()
         logger.info("Starting Screenpipe: %s", " ".join(args))
 
+        # Start in a new process group so we can kill the whole tree
         self._process = await asyncio.create_subprocess_exec(
             *args,
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.PIPE,
+            start_new_session=True,
         )
 
         # Poll /health until ready
@@ -88,14 +91,36 @@ class ScreenpipeProcess:
         if self._process is None or self._process.returncode is not None:
             return
 
-        logger.info("Stopping Screenpipe (pid %d)...", self._process.pid)
-        self._process.send_signal(signal.SIGINT)
+        pid = self._process.pid
+        logger.info("Stopping Screenpipe (pid %d)...", pid)
+
+        # Send SIGINT to the process group (npx spawns child processes)
         try:
-            await asyncio.wait_for(self._process.wait(), timeout=10.0)
+            os.killpg(os.getpgid(pid), signal.SIGINT)
+        except (ProcessLookupError, OSError):
+            self._process.send_signal(signal.SIGINT)
+
+        try:
+            await asyncio.wait_for(self._process.wait(), timeout=5.0)
+            logger.info("Screenpipe stopped.")
+            return
         except asyncio.TimeoutError:
-            logger.warning("Screenpipe did not exit in time, killing.")
-            self._process.kill()
-            await self._process.wait()
+            pass
+
+        # Escalate to SIGKILL on the whole process group
+        logger.warning("Screenpipe did not exit in 5s, killing process group.")
+        try:
+            os.killpg(os.getpgid(pid), signal.SIGKILL)
+        except (ProcessLookupError, OSError):
+            try:
+                self._process.kill()
+            except ProcessLookupError:
+                pass
+
+        try:
+            await asyncio.wait_for(self._process.wait(), timeout=3.0)
+        except asyncio.TimeoutError:
+            logger.warning("Screenpipe pid %d still alive after SIGKILL, abandoning.", pid)
         logger.info("Screenpipe stopped.")
 
 

@@ -1,18 +1,22 @@
 """WholeMem MCP Server — unified memory + workspace awareness.
 
-Merges Screenpipe captures, mem0 semantic memory, Obsidian daily notes,
-watchdog file versioning, and an SLM oracle into a single MCP interface.
+Thin FastMCP wrapper over WholeMemService.  Runs as a standalone
+HTTP server (streamable-http transport by default on port 8767).
+MCP clients connect to http://localhost:8767/mcp.
 
-Six tools: what_are_we_doing, what_happened, what_did_we_do,
-fix_this, we_did_this, remember_this.
+Also exposes:
+  GET  /health             — component status JSON
+  POST /control/screenpipe — start/stop Screenpipe {"action": "start"|"stop"}
+  POST /api/briefing       — orientation briefing (for Streamlit UI)
+  POST /api/fix            — fix_this (for Streamlit UI)
 """
 
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 import logging
+import signal
 import sys
 import time
 from collections.abc import AsyncIterator
@@ -21,26 +25,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-import aiosqlite
+import anyio
 from pydantic import BaseModel, Field
+from starlette.requests import Request
+from starlette.responses import JSONResponse, Response
 
 from mcp.server.fastmcp import FastMCP
 
 from wholemem_mcp.config import WholeMemConfig, load_config
-from wholemem_mcp.daemon import run_daemon, trigger_sync
-from wholemem_mcp.fs.blob_store import BlobStore
-from wholemem_mcp.fs.version_store import VersionStore
-from wholemem_mcp.fs.watcher import WAWDWatcher
-from wholemem_mcp.memory import MemoryStore
-from wholemem_mcp.obsidian import ObsidianWriter
-from wholemem_mcp.oracle.backends.openai_compat import OpenAICompatBackend
-from wholemem_mcp.oracle.context import ContextBuilder
-from wholemem_mcp.oracle.oracle import Oracle
-from wholemem_mcp.oracle.restorer import Restorer
-from wholemem_mcp.oracle.session_tracker import SessionTracker
-from wholemem_mcp.screenpipe import ScreenpipeClient, ScreenpipeProcess
-from wholemem_mcp.summarizer import Summarizer
-from wholemem_mcp.tasks import TaskStore
+from wholemem_mcp.service import WholeMemService
 
 # ---------------------------------------------------------------------------
 # Logging — stderr only (stdio transport reserves stdout)
@@ -55,171 +48,166 @@ logger = logging.getLogger("wholemem")
 
 
 # ---------------------------------------------------------------------------
-# Internal utilities (not MCP-exposed)
+# Module-level service — started in main(), accessed by routes and tools
 # ---------------------------------------------------------------------------
 
-async def check_status(ctx: Dict[str, Any]) -> Dict[str, Any]:
-    """Health check all components. Used internally by the oracle."""
-    config: WholeMemConfig = ctx["config"]
-    screenpipe: ScreenpipeClient = ctx["screenpipe"]
-    summarizer: Summarizer = ctx["summarizer"]
-    memory: MemoryStore = ctx["memory"]
-    obsidian: ObsidianWriter = ctx["obsidian"]
-
-    return {
-        "screenpipe": {"available": await screenpipe.is_available()},
-        "llm": {"available": await summarizer.is_available()},
-        "mem0": {"available": memory.is_available()},
-        "obsidian": {"available": obsidian.is_available()},
-        "watcher": {"enabled": config.watcher.enabled},
-    }
+_service: WholeMemService | None = None
 
 
-def _db_path_for_workspace(config: WholeMemConfig) -> Path:
-    """Derive a unique DB path per workspace (matches wawd convention)."""
-    ws_path = str(Path(config.watcher.path).expanduser().resolve())
-    slug = Path(ws_path).name
-    ws_hash = hashlib.sha1(ws_path.encode()).hexdigest()[:8]
-    db_dir = Path(config.versioning.db_path).expanduser()
-    db_dir.mkdir(parents=True, exist_ok=True)
-    return db_dir / f"wholemem_{slug}_{ws_hash}.db"
+def _svc() -> WholeMemService:
+    """Get the running service (raises if not started)."""
+    assert _service is not None, "WholeMemService not started"
+    return _service
 
 
 # ---------------------------------------------------------------------------
-# Lifespan — initialise all components
+# MCP lifespan — per-session, just yields the service context
 # ---------------------------------------------------------------------------
 
 @asynccontextmanager
-async def app_lifespan(server: FastMCP) -> AsyncIterator[Dict[str, Any]]:
-    """Initialise all WholeMem + wawd components."""
-    cfg = load_config()
-
-    # --- Screenpipe ---
-    sp_process: ScreenpipeProcess | None = None
-    if cfg.screenpipe.managed:
-        sp_process = ScreenpipeProcess(cfg.screenpipe)
-        try:
-            await sp_process.start()
-        except Exception as exc:
-            logger.warning("Failed to start managed Screenpipe: %s", exc)
-            sp_process = None
-
-    screenpipe = ScreenpipeClient(cfg.screenpipe)
-    summarizer = Summarizer(cfg.llm)
-    memory = MemoryStore(cfg)
-    obsidian = ObsidianWriter(cfg.obsidian)
-
-    # --- Version store (SQLite + watchdog) ---
-    db: aiosqlite.Connection | None = None
-    blob_store: BlobStore | None = None
-    version_store: VersionStore | None = None
-    session_tracker: SessionTracker | None = None
-    watcher: WAWDWatcher | None = None
-    oracle_obj: Oracle | None = None
-    backend: OpenAICompatBackend | None = None
-
-    if cfg.watcher.enabled:
-        db_path = _db_path_for_workspace(cfg)
-        db = await aiosqlite.connect(str(db_path))
-
-        blob_store = BlobStore(db, cfg.versioning.compression_level)
-        await blob_store.init_db()
-        version_store = VersionStore(db, blob_store)
-        await version_store.init_db()
-        session_tracker = SessionTracker(db, cfg.oracle.session_timeout_minutes)
-        await session_tracker.init_db()
-
-        # Oracle backend — reuses the LLM config
-        backend = OpenAICompatBackend(
-            base_url=cfg.llm.base_url,
-            model=cfg.llm.model,
-            api_key=cfg.llm.api_key,
-            timeout=300.0,
-        )
-
-        context_builder = ContextBuilder(
-            version_store, session_tracker, cfg.oracle.history_depth,
-        )
-        restorer = Restorer(
-            version_store, context_builder, backend,
-            str(Path(cfg.watcher.path).expanduser()),
-        )
-        oracle_obj = Oracle(
-            version_store, session_tracker, context_builder, restorer,
-            backend, str(Path(cfg.watcher.path).expanduser()),
-        )
-
-        # Start watcher
-        ws_path = str(Path(cfg.watcher.path).expanduser())
-        watcher = WAWDWatcher(
-            ws_path, version_store, cfg.watcher.exclude,
-            session_tracker=session_tracker,
-        )
-        await watcher.start()
-        oracle_obj.set_watcher(watcher)
-        restorer.set_watcher(watcher)
-
-        logger.info("Watcher + oracle started for %s", ws_path)
-
-    # --- Task store ---
-    task_store: TaskStore | None = None
-    if cfg.watcher.enabled:
-        task_store = TaskStore(Path(cfg.watcher.path).expanduser())
-
-    # --- Background daemon ---
-    daemon_task = asyncio.create_task(
-        run_daemon(cfg, screenpipe, summarizer, memory, obsidian,
-                   version_store=version_store)
-    )
-
-    logger.info("WholeMem MCP server initialised.")
-
-    try:
-        yield {
-            "config": cfg,
-            "screenpipe": screenpipe,
-            "summarizer": summarizer,
-            "memory": memory,
-            "obsidian": obsidian,
-            "daemon_task": daemon_task,
-            "db": db,
-            "blob_store": blob_store,
-            "version_store": version_store,
-            "session_tracker": session_tracker,
-            "watcher": watcher,
-            "oracle": oracle_obj,
-            "backend": backend,
-            "task_store": task_store,
-        }
-    finally:
-        daemon_task.cancel()
-        try:
-            await daemon_task
-        except asyncio.CancelledError:
-            pass
-        logger.info("Daemon stopped.")
-
-        if watcher:
-            await watcher.stop()
-        if backend:
-            await backend.close()
-
-        memory.close()
-
-        if db:
-            await db.close()
-
-        if sp_process is not None:
-            await sp_process.stop()
-
-        logger.info("WholeMem shutdown complete.")
+async def _mcp_lifespan(server: FastMCP) -> AsyncIterator[Dict[str, Any]]:
+    """Yields the shared service context for each MCP session."""
+    yield _svc().context_dict()
 
 
 # ---------------------------------------------------------------------------
 # Server instance
 # ---------------------------------------------------------------------------
 
-mcp = FastMCP("wholemem_mcp", lifespan=app_lifespan)
+mcp = FastMCP("wholemem_mcp", lifespan=_mcp_lifespan)
+
+
+# ---------------------------------------------------------------------------
+# Custom HTTP routes (not MCP — accessed by UI and health checks)
+# ---------------------------------------------------------------------------
+
+@mcp.custom_route("/health", methods=["GET"])
+async def health_check(request: Request) -> Response:
+    """Component health + uptime + active sessions."""
+    status = await _svc().status()
+    return JSONResponse(status)
+
+
+@mcp.custom_route("/control/screenpipe", methods=["POST"])
+async def control_screenpipe(request: Request) -> Response:
+    """Start or stop the managed Screenpipe process."""
+    svc = _svc()
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid JSON"}, status_code=400)
+
+    action = body.get("action", "")
+    if action == "start":
+        if svc.sp_process is not None:
+            return JSONResponse({"status": "already running"})
+        from wholemem_mcp.screenpipe import ScreenpipeProcess
+        svc.sp_process = ScreenpipeProcess(svc.config.screenpipe)
+        try:
+            await svc.sp_process.start()
+            return JSONResponse({"status": "started"})
+        except Exception as exc:
+            svc.sp_process = None
+            return JSONResponse({"error": str(exc)}, status_code=500)
+
+    elif action == "stop":
+        if svc.sp_process is None:
+            return JSONResponse({"status": "not running"})
+        try:
+            await svc.sp_process.stop()
+        finally:
+            svc.sp_process = None
+        return JSONResponse({"status": "stopped"})
+
+    return JSONResponse({"error": "action must be 'start' or 'stop'"}, status_code=400)
+
+
+@mcp.custom_route("/api/briefing", methods=["POST"])
+async def api_briefing(request: Request) -> Response:
+    """Run what_are_we_doing and return the briefing text (for the UI)."""
+    svc = _svc()
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+
+    workspace = body.get("workspace", str(Path(svc.config.watcher.path).expanduser()))
+    query = body.get("query")
+
+    parts: list[str] = []
+
+    # Oracle briefing
+    if svc.oracle:
+        try:
+            result = await svc.oracle.briefing(agent_name="ui", task=query, focus=query)
+            parts.append(result["briefing"])
+        except Exception as exc:
+            logger.warning("Oracle briefing failed: %s", exc)
+            parts.append("[Oracle unavailable]")
+
+    # Open tasks
+    if svc.task_store:
+        try:
+            tasks = svc.task_store.get_tasks()
+            if tasks:
+                task_lines = ["## Open Tasks"]
+                for t in tasks:
+                    line = f"- [ ] {t.text}"
+                    if t.task_id:
+                        line += f" (🆔 {t.task_id})"
+                    task_lines.append(line)
+                parts.append("\n".join(task_lines))
+        except Exception:
+            pass
+
+    # mem0 search
+    search_query = query or "recent activity"
+    if svc.memory:
+        try:
+            memories = svc.memory.search(query=search_query, limit=5)
+            if memories:
+                mem_lines = ["## Relevant Memory"]
+                for m in memories:
+                    mem_lines.append(f"- {m.get('memory', '')}")
+                parts.append("\n".join(mem_lines))
+        except Exception:
+            pass
+
+    text = "\n\n".join(parts) if parts else "No information available."
+    return JSONResponse({"briefing": text})
+
+
+@mcp.custom_route("/api/fix", methods=["POST"])
+async def api_fix(request: Request) -> Response:
+    """Run fix_this and return the result (for the UI)."""
+    svc = _svc()
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid JSON"}, status_code=400)
+
+    description = body.get("description", "")
+    dry_run = body.get("dry_run", True)
+
+    if not description:
+        return JSONResponse({"error": "description is required"}, status_code=400)
+
+    if svc.oracle is None:
+        return JSONResponse({"error": "Watcher/oracle not enabled"}, status_code=503)
+
+    try:
+        result = await svc.oracle.fix(problem=description, dry_run=dry_run)
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+    parts = [f"Action: {result['action_taken']}"]
+    if result["files_restored"]:
+        parts.append(f"Files: {len(result['files_restored'])}")
+        for f in result["files_restored"]:
+            parts.append(f"  - {f['path']} → v{f.get('to_version', '?')}")
+    parts.append(f"\n{result['explanation']}")
+
+    return JSONResponse({"result": "\n".join(parts), "raw": result})
 
 
 # ---------------------------------------------------------------------------
@@ -272,7 +260,7 @@ class RememberInput(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Tools
+# Tools — same handlers as before, using lifespan context
 # ---------------------------------------------------------------------------
 
 @mcp.tool(
@@ -292,26 +280,22 @@ async def what_are_we_doing(params: BriefingInput) -> str:
     next steps. Call this at the start of any session.
     """
     ctx = mcp.get_context().request_context.lifespan_context
-    oracle_obj: Oracle | None = ctx["oracle"]
-    memory: MemoryStore = ctx["memory"]
-    task_store: TaskStore | None = ctx["task_store"]
+    oracle_obj = ctx["oracle"]
+    memory = ctx["memory"]
+    task_store = ctx["task_store"]
 
     parts: list[str] = []
 
-    # Oracle briefing (file state + sessions)
     if oracle_obj:
         try:
             result = await oracle_obj.briefing(
-                agent_name="agent",
-                task=params.query,
-                focus=params.query,
+                agent_name="agent", task=params.query, focus=params.query,
             )
             parts.append(result["briefing"])
         except Exception as exc:
             logger.warning("Oracle briefing failed: %s", exc)
             parts.append("[Oracle unavailable]")
 
-    # Open tasks
     if task_store:
         try:
             tasks = task_store.get_tasks()
@@ -326,7 +310,6 @@ async def what_are_we_doing(params: BriefingInput) -> str:
         except Exception:
             pass
 
-    # mem0 search
     search_query = params.query or "recent activity"
     try:
         memories = memory.search(query=search_query, limit=5)
@@ -357,7 +340,7 @@ async def what_happened(params: FileHistoryInput) -> str:
     Returns a JSON array of version records. No SLM involved.
     """
     ctx = mcp.get_context().request_context.lifespan_context
-    version_store: VersionStore | None = ctx["version_store"]
+    version_store = ctx["version_store"]
 
     if version_store is None:
         return json.dumps({"error": "Watcher not enabled"})
@@ -404,14 +387,13 @@ async def what_did_we_do(params: NarrativeInput) -> str:
     Interleaves Screenpipe activity and file changes chronologically.
     """
     ctx = mcp.get_context().request_context.lifespan_context
-    screenpipe: ScreenpipeClient = ctx["screenpipe"]
-    summarizer: Summarizer = ctx["summarizer"]
-    memory: MemoryStore = ctx["memory"]
-    version_store: VersionStore | None = ctx["version_store"]
+    screenpipe = ctx["screenpipe"]
+    summarizer = ctx["summarizer"]
+    memory = ctx["memory"]
+    version_store = ctx["version_store"]
 
     sources: list[str] = []
 
-    # Screenpipe timeline
     try:
         items = await screenpipe.get_recent_activity(minutes=params.minutes)
         if items:
@@ -421,7 +403,6 @@ async def what_did_we_do(params: NarrativeInput) -> str:
     except Exception as exc:
         logger.warning("Screenpipe fetch failed: %s", exc)
 
-    # File changes
     if version_store and params.workspace:
         since = time.time() - (params.minutes * 60)
         try:
@@ -437,7 +418,6 @@ async def what_did_we_do(params: NarrativeInput) -> str:
         except Exception as exc:
             logger.warning("Version store query failed: %s", exc)
 
-    # mem0 recent facts
     try:
         query = params.focus or "recent activity"
         memories = memory.search(query=query, limit=5)
@@ -452,7 +432,6 @@ async def what_did_we_do(params: NarrativeInput) -> str:
     if not sources:
         return "No activity found in the requested time window."
 
-    # Summarize via SLM
     combined = "\n\n".join(sources)
     try:
         summary = await summarizer.summarize_activity(
@@ -479,17 +458,14 @@ async def fix_this(params: FixInput) -> str:
     Defaults to dry_run=true — call again with dry_run=false to execute.
     """
     ctx = mcp.get_context().request_context.lifespan_context
-    oracle_obj: Oracle | None = ctx["oracle"]
-    task_store: TaskStore | None = ctx["task_store"]
+    oracle_obj = ctx["oracle"]
+    task_store = ctx["task_store"]
 
     if oracle_obj is None:
         return "Error: Watcher/oracle not enabled. Cannot restore files."
 
     try:
-        result = await oracle_obj.fix(
-            problem=params.description,
-            dry_run=params.dry_run,
-        )
+        result = await oracle_obj.fix(problem=params.description, dry_run=params.dry_run)
     except Exception as exc:
         return f"Restoration failed: {exc}"
 
@@ -500,7 +476,6 @@ async def fix_this(params: FixInput) -> str:
             parts.append(f"  - {f['path']} → v{f.get('to_version', '?')}")
     parts.append(f"\n{result['explanation']}")
 
-    # Side effect: if description matches an open task, complete it
     if not params.dry_run and task_store:
         try:
             tasks = task_store.get_tasks()
@@ -530,13 +505,12 @@ async def we_did_this(params: LogCompletionInput) -> str:
     and/or append to today's daily note.
     """
     ctx = mcp.get_context().request_context.lifespan_context
-    memory: MemoryStore = ctx["memory"]
-    obsidian: ObsidianWriter = ctx["obsidian"]
-    task_store: TaskStore | None = ctx["task_store"]
+    memory = ctx["memory"]
+    obsidian = ctx["obsidian"]
+    task_store = ctx["task_store"]
 
     confirmations: list[str] = []
 
-    # Always write to mem0
     metadata: Dict[str, Any] = {"source": "we_did_this"}
     if params.workspace:
         metadata["workspace"] = params.workspace
@@ -548,8 +522,8 @@ async def we_did_this(params: LogCompletionInput) -> str:
     except Exception as exc:
         confirmations.append(f"Memory write failed: {exc}")
 
-    # Task completion
     if params.task_id:
+        from wholemem_mcp.tasks import TaskStore
         ts = task_store
         if ts is None and params.workspace:
             ts = TaskStore(Path(params.workspace).expanduser())
@@ -562,7 +536,6 @@ async def we_did_this(params: LogCompletionInput) -> str:
         else:
             confirmations.append("Cannot complete task: no workspace provided")
 
-    # Daily note append
     if params.append_note:
         try:
             path = obsidian.append_entry(f"- {params.summary}")
@@ -589,7 +562,7 @@ async def remember_this(params: RememberInput) -> str:
     No task semantics, no file linkage, no daily note write.
     """
     ctx = mcp.get_context().request_context.lifespan_context
-    memory: MemoryStore = ctx["memory"]
+    memory = ctx["memory"]
 
     metadata: Dict[str, Any] = {"source": params.source or "manual"}
     if params.category:
@@ -607,9 +580,69 @@ async def remember_this(params: RememberInput) -> str:
 # Entrypoint
 # ---------------------------------------------------------------------------
 
+async def _run_server() -> None:
+    """Start the service, then serve MCP + REST over HTTP."""
+    global _service
+
+    cfg = load_config()
+    _service = WholeMemService(cfg)
+    await _service.start()
+
+    # Configure transport from config
+    transport = cfg.server.transport
+    mcp.settings.host = cfg.server.host
+    mcp.settings.port = cfg.server.port
+
+    logger.info(
+        "WholeMem server starting on %s:%d (transport=%s)",
+        cfg.server.host, cfg.server.port, transport,
+    )
+
+    if transport == "stdio":
+        # stdio fallback — no HTTP server
+        try:
+            await mcp.run_stdio_async()
+        finally:
+            await _service.stop()
+            _service = None
+        return
+
+    import uvicorn
+
+    if transport == "sse":
+        app = mcp.sse_app()
+    else:
+        app = mcp.streamable_http_app()
+
+    uv_config = uvicorn.Config(
+        app,
+        host=cfg.server.host,
+        port=cfg.server.port,
+        log_level="info",
+    )
+    server = uvicorn.Server(uv_config)
+
+    # Install signal handlers for graceful shutdown
+    loop = asyncio.get_running_loop()
+
+    def _signal_handler() -> None:
+        logger.info("Shutdown signal received")
+        server.should_exit = True
+
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        loop.add_signal_handler(sig, _signal_handler)
+
+    try:
+        await server.serve()
+    finally:
+        if _service is not None:
+            await _service.stop()
+            _service = None
+
+
 def main() -> None:
-    """Run the WholeMem MCP server (stdio transport)."""
-    mcp.run()
+    """Run the WholeMem server (HTTP transport by default)."""
+    anyio.run(_run_server)
 
 
 if __name__ == "__main__":

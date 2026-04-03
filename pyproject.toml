@@ -20,10 +20,18 @@ dependencies = [
     "watchdog>=4.0.0",
     "aiosqlite>=0.20.0",
     "zstandard>=0.22.0",
+    "uvicorn>=0.30.0",
+    "starlette>=0.37.0",
+    "anyio>=4.0.0",
 ]
+
+[project.optional-dependencies]
+ui = ["streamlit>=1.35.0"]
 
 [project.scripts]
 wholemem-mcp = "wholemem_mcp.server:main"
+wholemem-server = "wholemem_mcp.server:main"
+wholemem-ui = "wholemem_mcp.ui.run:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/wholemem_mcp"]

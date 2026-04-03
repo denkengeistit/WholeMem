@@ -52,3 +52,8 @@ versioning:
 oracle:
   history_depth: 50                     # max version entries in oracle context
   session_timeout_minutes: 30           # idle timeout before session auto-completes
+
+server:
+  host: "127.0.0.1"
+  port: 8767
+  transport: "streamable-http"          # 'streamable-http', 'sse', or 'stdio'

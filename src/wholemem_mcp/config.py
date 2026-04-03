@@ -42,7 +42,8 @@ class EmbedderConfig(BaseModel):
 
 class Mem0Config(BaseModel):
     user_id: str = Field(default="default_user", description="Default mem0 user scope")
-    qdrant_path: str = Field(default="~/.wholemem/qdrant", description="On-disk Qdrant storage path")
+    qdrant_url: str = Field(default="", description="Qdrant server URL (e.g. http://localhost:6333). If empty, uses embedded mode with qdrant_path.")
+    qdrant_path: str = Field(default="~/.wholemem/qdrant", description="On-disk Qdrant storage path (embedded mode only)")
 
 
 class ObsidianConfig(BaseModel):
@@ -77,6 +78,12 @@ class OracleConfig(BaseModel):
     session_timeout_minutes: int = Field(default=30, description="Idle timeout before session is completed")
 
 
+class ServerConfig(BaseModel):
+    host: str = Field(default="127.0.0.1", description="Bind address for the HTTP server")
+    port: int = Field(default=8767, description="Port for MCP + REST endpoints")
+    transport: str = Field(default="streamable-http", description="MCP transport: 'streamable-http', 'sse', or 'stdio'")
+
+
 # ---------------------------------------------------------------------------
 # Root config
 # ---------------------------------------------------------------------------
@@ -91,6 +98,7 @@ class WholeMemConfig(BaseModel):
     watcher: WatcherConfig = Field(default_factory=WatcherConfig)
     versioning: VersioningConfig = Field(default_factory=VersioningConfig)
     oracle: OracleConfig = Field(default_factory=OracleConfig)
+    server: ServerConfig = Field(default_factory=ServerConfig)
 
 
 # ---------------------------------------------------------------------------
@@ -124,6 +132,7 @@ def _env_overrides(cfg: WholeMemConfig) -> WholeMemConfig:
         "WHOLEMEM_EMBEDDER_BASE_URL": ("embedder", "base_url"),
         "WHOLEMEM_EMBEDDER_DIMS": ("embedder", "embedding_dims"),
         "WHOLEMEM_MEM0_USER_ID": ("mem0", "user_id"),
+        "WHOLEMEM_MEM0_QDRANT_URL": ("mem0", "qdrant_url"),
         "WHOLEMEM_MEM0_QDRANT_PATH": ("mem0", "qdrant_path"),
         "WHOLEMEM_OBSIDIAN_VAULT_PATH": ("obsidian", "vault_path"),
         "WHOLEMEM_OBSIDIAN_DAILY_SUBFOLDER": ("obsidian", "daily_notes_subfolder"),
@@ -135,6 +144,9 @@ def _env_overrides(cfg: WholeMemConfig) -> WholeMemConfig:
         "WHOLEMEM_VERSIONING_HISTORY_DEPTH": ("versioning", "history_depth"),
         "WHOLEMEM_ORACLE_HISTORY_DEPTH": ("oracle", "history_depth"),
         "WHOLEMEM_ORACLE_SESSION_TIMEOUT": ("oracle", "session_timeout_minutes"),
+        "WHOLEMEM_SERVER_HOST": ("server", "host"),
+        "WHOLEMEM_SERVER_PORT": ("server", "port"),
+        "WHOLEMEM_SERVER_TRANSPORT": ("server", "transport"),
     }
 
     data = cfg.model_dump()

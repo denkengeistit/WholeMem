@@ -105,7 +105,20 @@ class WAWDWatcher:
         await self._initial_scan()
 
     async def stop(self) -> None:
-        """Stop observer + drain loop."""
+        """Stop observer + drain loop, flushing pending events first."""
+        # Flush any pending events before shutting down
+        if self._pending:
+            with self._pending_lock:
+                batch = dict(self._pending)
+                self._pending.clear()
+            for abs_path, op in batch.items():
+                rel = self._relpath(abs_path)
+                if rel is not None:
+                    try:
+                        await self._version_one(rel, abs_path, op)
+                    except Exception:
+                        log.debug("Failed to flush %s during shutdown", rel)
+
         if self._drain_task:
             self._drain_task.cancel()
             try:
@@ -114,7 +127,9 @@ class WAWDWatcher:
                 pass
         if self._observer:
             self._observer.stop()
-            self._observer.join()
+            self._observer.join(timeout=5)
+            if self._observer.is_alive():
+                log.warning("Observer thread did not exit within 5s")
         log.info("Watcher stopped")
 
     # ── pause / resume (used by Restorer) ─────────────────────────
