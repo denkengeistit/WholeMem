@@ -31,3 +31,24 @@ obsidian:
 
 daemon:
   interval_minutes: 15
+
+watcher:
+  enabled: true
+  path: "~/Scratch"                     # workspace root to watch
+  exclude:
+    - "node_modules/"
+    - ".git/"
+    - "__pycache__/"
+    - "*.pyc"
+    - "build/"
+    - "dist/"
+    - ".DS_Store"
+
+versioning:
+  compression_level: 3                  # zstd compression level
+  db_path: "~/.wholemem/"               # per-workspace DBs written here
+  history_depth: 3                      # max versions kept per file
+
+oracle:
+  history_depth: 50                     # max version entries in oracle context
+  session_timeout_minutes: 30           # idle timeout before session auto-completes

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 import yaml
 from pydantic import BaseModel, Field
@@ -54,6 +54,29 @@ class DaemonConfig(BaseModel):
     interval_minutes: int = Field(default=15, description="Sync interval in minutes")
 
 
+class WatcherConfig(BaseModel):
+    enabled: bool = Field(default=True, description="Enable filesystem watcher")
+    path: str = Field(default="~/Scratch", description="Workspace root directory to watch")
+    exclude: List[str] = Field(
+        default=[
+            "node_modules/", ".git/", "__pycache__/", "*.pyc",
+            "build/", "dist/", ".DS_Store", "*.swp", "*~", "*.tmp", ".#*",
+        ],
+        description="Glob patterns to exclude from watching",
+    )
+
+
+class VersioningConfig(BaseModel):
+    compression_level: int = Field(default=3, description="Zstandard compression level")
+    db_path: str = Field(default="~/.wholemem/", description="Directory for per-workspace SQLite databases")
+    history_depth: int = Field(default=3, description="Max versions kept per file")
+
+
+class OracleConfig(BaseModel):
+    history_depth: int = Field(default=50, description="Max version entries in oracle context")
+    session_timeout_minutes: int = Field(default=30, description="Idle timeout before session is completed")
+
+
 # ---------------------------------------------------------------------------
 # Root config
 # ---------------------------------------------------------------------------
@@ -65,6 +88,9 @@ class WholeMemConfig(BaseModel):
     mem0: Mem0Config = Field(default_factory=Mem0Config)
     obsidian: ObsidianConfig = Field(default_factory=ObsidianConfig)
     daemon: DaemonConfig = Field(default_factory=DaemonConfig)
+    watcher: WatcherConfig = Field(default_factory=WatcherConfig)
+    versioning: VersioningConfig = Field(default_factory=VersioningConfig)
+    oracle: OracleConfig = Field(default_factory=OracleConfig)
 
 
 # ---------------------------------------------------------------------------
@@ -102,6 +128,13 @@ def _env_overrides(cfg: WholeMemConfig) -> WholeMemConfig:
         "WHOLEMEM_OBSIDIAN_VAULT_PATH": ("obsidian", "vault_path"),
         "WHOLEMEM_OBSIDIAN_DAILY_SUBFOLDER": ("obsidian", "daily_notes_subfolder"),
         "WHOLEMEM_DAEMON_INTERVAL": ("daemon", "interval_minutes"),
+        "WHOLEMEM_WATCHER_ENABLED": ("watcher", "enabled"),
+        "WHOLEMEM_WATCHER_PATH": ("watcher", "path"),
+        "WHOLEMEM_VERSIONING_COMPRESSION": ("versioning", "compression_level"),
+        "WHOLEMEM_VERSIONING_DB_PATH": ("versioning", "db_path"),
+        "WHOLEMEM_VERSIONING_HISTORY_DEPTH": ("versioning", "history_depth"),
+        "WHOLEMEM_ORACLE_HISTORY_DEPTH": ("oracle", "history_depth"),
+        "WHOLEMEM_ORACLE_SESSION_TIMEOUT": ("oracle", "session_timeout_minutes"),
     }
 
     data = cfg.model_dump()

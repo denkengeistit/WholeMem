@@ -4,6 +4,7 @@
 2. Summarize via SLM
 3. Store summaries in mem0
 4. Append to today's Obsidian Daily Note
+5. Query version store for file changes, summarize, store in mem0
 """
 
 from __future__ import annotations
@@ -15,6 +16,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from wholemem_mcp.config import WholeMemConfig
+from wholemem_mcp.fs.version_store import VersionStore
 from wholemem_mcp.memory import MemoryStore
 from wholemem_mcp.obsidian import ObsidianWriter
 from wholemem_mcp.screenpipe import ScreenpipeClient
@@ -29,6 +31,7 @@ async def _run_sync_cycle(
     memory: MemoryStore,
     obsidian: ObsidianWriter,
     interval_minutes: int,
+    version_store: VersionStore | None = None,
 ) -> str:
     """Execute a single sync cycle.
 
@@ -81,6 +84,29 @@ async def _run_sync_cycle(
     except Exception as exc:
         logger.warning("Obsidian write failed: %s", exc)
 
+    # 5. File change sync ------------------------------------------------
+    if version_store is not None:
+        try:
+            import time
+            since = time.time() - (interval_minutes * 60)
+            changes = await version_store.get_changes_since(since)
+            if changes:
+                change_lines = []
+                for c in changes:
+                    change_lines.append(f"{c.operation} {c.path} by {c.agent_id or 'unknown'}")
+                change_text = f"File changes ({len(changes)}): " + "; ".join(change_lines[:20])
+                memory.add(
+                    content=change_text,
+                    metadata={
+                        "source": "file_watcher",
+                        "timestamp": timestamp,
+                        "change_count": len(changes),
+                    },
+                )
+                logger.info("Stored %d file changes in mem0.", len(changes))
+        except Exception as exc:
+            logger.warning("File change sync failed: %s", exc)
+
     return f"Synced {len(items)} items. Summary stored and daily note updated."
 
 
@@ -90,6 +116,7 @@ async def run_daemon(
     summarizer: Summarizer,
     memory: MemoryStore,
     obsidian: ObsidianWriter,
+    version_store: VersionStore | None = None,
 ) -> None:
     """Run the background sync loop forever.
 
@@ -106,6 +133,7 @@ async def run_daemon(
             status = await _run_sync_cycle(
                 screenpipe, summarizer, memory, obsidian,
                 config.daemon.interval_minutes,
+                version_store=version_store,
             )
             logger.info("Sync cycle complete: %s", status)
         except Exception as exc:
@@ -120,6 +148,10 @@ async def trigger_sync(
     memory: MemoryStore,
     obsidian: ObsidianWriter,
     minutes: int = 15,
+    version_store: VersionStore | None = None,
 ) -> str:
-    """Manually trigger a single sync cycle (used by the MCP sync_now tool)."""
-    return await _run_sync_cycle(screenpipe, summarizer, memory, obsidian, minutes)
+    """Manually trigger a single sync cycle (used internally)."""
+    return await _run_sync_cycle(
+        screenpipe, summarizer, memory, obsidian, minutes,
+        version_store=version_store,
+    )
