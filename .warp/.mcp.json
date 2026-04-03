@@ -12,7 +12,7 @@
         "WHOLEMEM_EMBEDDER_BASE_URL": "http://192.168.3.2:1234/v1",
         "WHOLEMEM_OBSIDIAN_VAULT_PATH": "/Users/andme/Scratch/",
         "WHOLEMEM_OBSIDIAN_DAILY_SUBFOLDER": "wholemem_data",
-        "WHOLEMEM_SCREENPIPE_MANAGED": "false"
+        "WHOLEMEM_SCREENPIPE_MANAGED": "true"
       }
     }
   }
