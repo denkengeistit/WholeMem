@@ -125,14 +125,23 @@ class WholeMemConfig(BaseModel):
 # ---------------------------------------------------------------------------
 
 def _find_config_file() -> Optional[Path]:
-    """Search for config.yaml in CWD then ~/.wholemem/."""
-    candidates = [
-        Path.cwd() / "config.yaml",
-        Path.home() / ".wholemem" / "config.yaml",
-    ]
-    for p in candidates:
-        if p.is_file():
-            return p
+    """Search for config.yaml: CWD, then parent dirs up to root, then ~/.wholemem/."""
+    # Walk up from CWD (catches project root regardless of which subdir you're in)
+    d = Path.cwd()
+    while True:
+        candidate = d / "config.yaml"
+        if candidate.is_file():
+            return candidate
+        parent = d.parent
+        if parent == d:
+            break  # filesystem root
+        d = parent
+
+    # Fall back to ~/.wholemem/
+    home_cfg = Path.home() / ".wholemem" / "config.yaml"
+    if home_cfg.is_file():
+        return home_cfg
+
     return None
 
 
