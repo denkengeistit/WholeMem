@@ -70,7 +70,7 @@ class ObsidianConfig(BaseModel):
 
 
 class DaemonConfig(BaseModel):
-    interval_minutes: int = Field(default=15, description="Sync interval in minutes")
+    interval_minutes: int = Field(default=5, description="Sync interval in minutes")
 
 
 class WatcherConfig(BaseModel):

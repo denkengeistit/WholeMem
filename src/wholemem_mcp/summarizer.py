@@ -18,8 +18,45 @@ from wholemem_mcp.config import LLMConfig, SummarizerConfig
 # ---------------------------------------------------------------------------
 
 def _flatten_items(items: List[Dict[str, Any]]) -> str:
-    """Convert Screenpipe content items into a plain-text transcript."""
+    """Convert Screenpipe content items into a deduplicated plain-text transcript.
+
+    Screenpipe captures OCR every few seconds, producing near-identical text
+    when the user is looking at the same window.  We deduplicate consecutive
+    captures from the same app whose text content hasn't meaningfully changed
+    (>80% overlap), keeping only the first occurrence with a count annotation.
+    Audio and UI events are never deduplicated.
+    """
     lines: List[str] = []
+    # Track last OCR per app for dedup
+    last_ocr: Dict[str, str] = {}  # app -> last text
+    last_ocr_ts: Dict[str, str] = {}  # app -> first timestamp of this run
+    ocr_counts: Dict[str, int] = {}  # app -> repeat count
+
+    def _flush_ocr(app: str) -> None:
+        """Emit a pending OCR entry with its repeat count."""
+        if app in last_ocr:
+            count = ocr_counts.get(app, 1)
+            ts = last_ocr_ts[app]
+            text = last_ocr[app]
+            suffix = f" [x{count}]" if count > 1 else ""
+            lines.append(f"[{ts}] (screen/{app}) {text[:500]}{suffix}")
+            del last_ocr[app]
+            del last_ocr_ts[app]
+            ocr_counts.pop(app, None)
+
+    def _text_similar(a: str, b: str) -> bool:
+        """Check if two texts are >80% similar (by shared prefix length)."""
+        if not a or not b:
+            return False
+        shorter = min(len(a), len(b))
+        common = 0
+        for i in range(shorter):
+            if a[i] == b[i]:
+                common += 1
+            else:
+                break
+        return common / shorter > 0.8 if shorter > 0 else False
+
     for item in items:
         ctype = item.get("type", "Unknown")
         content = item.get("content", {})
@@ -28,8 +65,16 @@ def _flatten_items(items: List[Dict[str, Any]]) -> str:
             ts = content.get("timestamp", "")
             app = content.get("app_name", "unknown")
             text = content.get("text", "").strip()
-            if text:
-                lines.append(f"[{ts}] (screen/{app}) {text[:500]}")
+            if not text:
+                continue
+            # Deduplicate consecutive similar OCR from same app
+            if app in last_ocr and _text_similar(last_ocr[app], text):
+                ocr_counts[app] = ocr_counts.get(app, 1) + 1
+            else:
+                _flush_ocr(app)  # emit previous run
+                last_ocr[app] = text
+                last_ocr_ts[app] = ts
+                ocr_counts[app] = 1
 
         elif ctype == "Audio":
             ts = content.get("timestamp", "")
@@ -44,6 +89,10 @@ def _flatten_items(items: List[Dict[str, Any]]) -> str:
             text = content.get("text", "").strip()
             if text:
                 lines.append(f"[{ts}] (ui/{app}) {text[:300]}")
+
+    # Flush remaining OCR entries
+    for app in list(last_ocr.keys()):
+        _flush_ocr(app)
 
     return "\n".join(lines) if lines else "(no activity captured)"
 
