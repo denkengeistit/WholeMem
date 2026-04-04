@@ -45,17 +45,18 @@ def _flatten_items(items: List[Dict[str, Any]]) -> str:
             ocr_counts.pop(app, None)
 
     def _text_similar(a: str, b: str) -> bool:
-        """Check if two texts are >80% similar (by shared prefix length)."""
+        """Check if two texts are >80% similar by length ratio and shared prefix."""
         if not a or not b:
             return False
-        shorter = min(len(a), len(b))
-        common = 0
-        for i in range(shorter):
-            if a[i] == b[i]:
-                common += 1
-            else:
-                break
-        return common / shorter > 0.8 if shorter > 0 else False
+        # If lengths differ dramatically, they're different content
+        ratio = min(len(a), len(b)) / max(len(a), len(b))
+        if ratio < 0.7:
+            return False
+        # Check first 200 chars of each — if 80%+ match, it's the same screen
+        sample_a = a[:200]
+        sample_b = b[:200]
+        matches = sum(1 for ca, cb in zip(sample_a, sample_b) if ca == cb)
+        return matches / max(len(sample_a), len(sample_b)) > 0.8
 
     for item in items:
         ctype = item.get("type", "Unknown")
@@ -94,7 +95,14 @@ def _flatten_items(items: List[Dict[str, Any]]) -> str:
     for app in list(last_ocr.keys()):
         _flush_ocr(app)
 
-    return "\n".join(lines) if lines else "(no activity captured)"
+    result = "\n".join(lines) if lines else "(no activity captured)"
+    if result != "(no activity captured)":
+        import logging
+        logging.getLogger("wholemem.summarizer").info(
+            "Transcript: %d items → %d lines, %d chars",
+            len(items), len(lines), len(result),
+        )
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -116,6 +124,19 @@ class Summarizer:
             base_url=base_url,
             api_key=api_key,
         )
+
+    @staticmethod
+    def _extract_content(response) -> str:
+        """Extract text from a chat completion, handling Qwen3 thinking mode.
+
+        Qwen3 may put the actual output in content or reasoning_content.
+        """
+        msg = response.choices[0].message
+        text = msg.content or ""
+        if not text:
+            # Qwen3 thinking mode: output may be in reasoning_content
+            text = getattr(msg, "reasoning_content", "") or ""
+        return text
 
     async def summarize_activity(self, items: List[Dict[str, Any]]) -> str:
         """Produce a concise timestamped summary of Screenpipe activity items.
@@ -141,13 +162,14 @@ class Summarizer:
                         "You are a concise activity summarizer. Given timestamped screen "
                         "and audio captures, produce a brief summary of what the user was "
                         "doing. Group by topic/app. Keep it under 200 words. "
-                        "Preserve important timestamps. Output plain text."
+                        "Preserve important timestamps. Output plain text. "
+                        "/no_think"
                     ),
                 },
                 {"role": "user", "content": transcript},
             ],
         )
-        return response.choices[0].message.content or ""
+        return self._extract_content(response)
 
     async def summarize_for_daily_note(self, items: List[Dict[str, Any]]) -> str:
         """Produce a Markdown-formatted summary suitable for an Obsidian daily note.
@@ -175,13 +197,14 @@ class Summarizer:
                         "summary for their daily note. Use bullet points grouped by "
                         "topic or application. Include timestamps in HH:MM format. "
                         "Be concise but capture key facts, decisions, and URLs. "
-                        "Output only the Markdown bullet list, no heading."
+                        "Output only the Markdown bullet list, no heading. "
+                        "/no_think"
                     ),
                 },
                 {"role": "user", "content": transcript},
             ],
         )
-        return response.choices[0].message.content or ""
+        return self._extract_content(response)
 
     async def is_available(self) -> bool:
         """Check whether the LLM endpoint is reachable."""

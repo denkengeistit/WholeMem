@@ -90,15 +90,45 @@ class ScreenpipeProcess:
             f"Screenpipe did not become ready within {timeout}s"
         )
 
+    def _find_port_pid(self) -> int | None:
+        """Find the PID listening on the Screenpipe port (catches orphaned grandchildren)."""
+        import subprocess
+        parsed = urlparse(self._cfg.url)
+        port = parsed.port or 3030
+        try:
+            result = subprocess.run(
+                ["lsof", "-ti", f":{port}"],
+                capture_output=True, text=True, timeout=5,
+            )
+            if result.returncode == 0:
+                for line in result.stdout.strip().splitlines():
+                    pid = int(line.strip())
+                    if pid != os.getpid():  # don't kill ourselves
+                        return pid
+        except Exception:
+            pass
+        return None
+
     async def stop(self) -> None:
-        """Terminate the Screenpipe subprocess gracefully."""
+        """Terminate the Screenpipe subprocess gracefully.
+
+        npx spawns screenpipe as a grandchild that can outlive npx.
+        We kill by process group first, then fall back to killing
+        whatever is listening on the configured port.
+        """
         if self._process is None or self._process.returncode is not None:
+            # npx may have exited but the screenpipe grandchild survives
+            port_pid = self._find_port_pid()
+            if port_pid:
+                logger.info("Found orphaned Screenpipe on port (pid %d), killing.", port_pid)
+                os.kill(port_pid, signal.SIGTERM)
+                await asyncio.sleep(1.0)
             return
 
         pid = self._process.pid
         logger.info("Stopping Screenpipe (pid %d)...", pid)
 
-        # Send SIGINT to the process group (npx spawns child processes)
+        # Send SIGINT to the process group (npx + children)
         try:
             os.killpg(os.getpgid(pid), signal.SIGINT)
         except (ProcessLookupError, OSError):
@@ -106,12 +136,10 @@ class ScreenpipeProcess:
 
         try:
             await asyncio.wait_for(self._process.wait(), timeout=5.0)
-            logger.info("Screenpipe stopped.")
-            return
         except asyncio.TimeoutError:
             pass
 
-        # Escalate to SIGKILL on the whole process group
+        # Escalate to SIGKILL on the process group
         logger.warning("Screenpipe did not exit in 5s, killing process group.")
         try:
             os.killpg(os.getpgid(pid), signal.SIGKILL)
@@ -124,7 +152,17 @@ class ScreenpipeProcess:
         try:
             await asyncio.wait_for(self._process.wait(), timeout=3.0)
         except asyncio.TimeoutError:
-            logger.warning("Screenpipe pid %d still alive after SIGKILL, abandoning.", pid)
+            pass
+
+        # Final safety net: kill whatever is still on the port
+        port_pid = self._find_port_pid()
+        if port_pid:
+            logger.warning("Screenpipe grandchild still alive (pid %d), killing by port.", port_pid)
+            try:
+                os.kill(port_pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
         logger.info("Screenpipe stopped.")
 
 
@@ -205,8 +243,8 @@ class ScreenpipeClient:
 
         return await self._get("/search", params=params)
 
-    async def get_recent_activity(self, minutes: int = 15) -> List[Dict[str, Any]]:
-        """Fetch all captured content from the last N minutes.
+    async def get_recent_activity(self, minutes: int = 15, limit: int = 50) -> List[Dict[str, Any]]:
+        """Fetch captured content from the last N minutes.
 
         Returns a flat list of content items (OCR + audio).
         """
@@ -217,7 +255,7 @@ class ScreenpipeClient:
             content_type="all",
             start_time=start.isoformat(),
             end_time=now.isoformat(),
-            limit=100,
+            limit=limit,
         )
         return result.get("data", [])
 

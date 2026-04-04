@@ -39,8 +39,11 @@ async def _run_sync_cycle(
         A status message describing what was done.
     """
     # 1. Fetch recent activity -------------------------------------------
+    # Fetch a wider window than the interval to account for Screenpipe
+    # indexing lag. Dedup in _flatten_items handles any overlap.
+    fetch_minutes = max(interval_minutes * 2, 2)
     try:
-        items = await screenpipe.get_recent_activity(minutes=interval_minutes)
+        items = await screenpipe.get_recent_activity(minutes=fetch_minutes)
     except Exception as exc:
         msg = f"Screenpipe fetch failed: {exc}"
         logger.warning(msg)
