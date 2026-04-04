@@ -10,7 +10,7 @@ from typing import Any, Dict, List
 
 from openai import AsyncOpenAI
 
-from wholemem_mcp.config import LLMConfig
+from wholemem_mcp.config import LLMConfig, SummarizerConfig
 
 
 # ---------------------------------------------------------------------------
@@ -55,14 +55,18 @@ def _flatten_items(items: List[Dict[str, Any]]) -> str:
 class Summarizer:
     """Calls a local SLM via OpenAI-compatible API to condense activity."""
 
-    def __init__(self, config: LLMConfig) -> None:
+    def __init__(self, summarizer_cfg: SummarizerConfig, llm_cfg: LLMConfig) -> None:
+        # Use summarizer-specific config, falling back to main LLM for empty fields
+        base_url = summarizer_cfg.base_url or llm_cfg.base_url
+        api_key = summarizer_cfg.api_key or llm_cfg.api_key
+        self._model = summarizer_cfg.model or llm_cfg.model
+        self._temperature = summarizer_cfg.temperature
+        self._max_tokens = summarizer_cfg.max_tokens
+
         self._client = AsyncOpenAI(
-            base_url=config.base_url,
-            api_key=config.api_key,
+            base_url=base_url,
+            api_key=api_key,
         )
-        self._model = config.model
-        self._temperature = config.temperature
-        self._max_tokens = config.max_tokens
 
     async def summarize_activity(self, items: List[Dict[str, Any]]) -> str:
         """Produce a concise timestamped summary of Screenpipe activity items.

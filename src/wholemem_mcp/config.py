@@ -30,11 +30,25 @@ class ScreenpipeConfig(BaseModel):
 
 
 class LLMConfig(BaseModel):
+    """LLM for oracle, mem0 fact extraction, and heavy tasks."""
     base_url: str = Field(default="http://localhost:1234/v1", description="OpenAI-compatible endpoint")
-    model: str = Field(default="qwen3-1.7b", description="Model name for summarization / chat")
+    model: str = Field(default="qwen3-1.7b", description="Model name")
     api_key: str = Field(default="lm-studio", description="API key (most local servers accept any string)")
     temperature: float = Field(default=0.3, description="Sampling temperature")
     max_tokens: int = Field(default=1024, description="Max tokens to generate")
+
+
+class SummarizerConfig(BaseModel):
+    """LLM for the summarizer (daemon + what_did_we_do). Can be a smaller/cheaper model.
+
+    Defaults to apfel (Apple Intelligence on-device model) if available,
+    otherwise falls back to the main LLM config.
+    """
+    base_url: str = Field(default="", description="OpenAI-compatible endpoint. Empty = use llm.base_url")
+    model: str = Field(default="", description="Model name. Empty = use llm.model")
+    api_key: str = Field(default="", description="API key. Empty = use llm.api_key")
+    temperature: float = Field(default=0.3, description="Sampling temperature")
+    max_tokens: int = Field(default=512, description="Max tokens to generate (smaller for summaries)")
 
 
 class EmbedderConfig(BaseModel):
@@ -95,6 +109,7 @@ class ServerConfig(BaseModel):
 class WholeMemConfig(BaseModel):
     screenpipe: ScreenpipeConfig = Field(default_factory=ScreenpipeConfig)
     llm: LLMConfig = Field(default_factory=LLMConfig)
+    summarizer_llm: SummarizerConfig = Field(default_factory=SummarizerConfig)
     embedder: EmbedderConfig = Field(default_factory=EmbedderConfig)
     mem0: Mem0Config = Field(default_factory=Mem0Config)
     obsidian: ObsidianConfig = Field(default_factory=ObsidianConfig)
@@ -132,6 +147,9 @@ def _env_overrides(cfg: WholeMemConfig) -> WholeMemConfig:
         "WHOLEMEM_LLM_BASE_URL": ("llm", "base_url"),
         "WHOLEMEM_LLM_MODEL": ("llm", "model"),
         "WHOLEMEM_LLM_API_KEY": ("llm", "api_key"),
+        "WHOLEMEM_SUMMARIZER_BASE_URL": ("summarizer_llm", "base_url"),
+        "WHOLEMEM_SUMMARIZER_MODEL": ("summarizer_llm", "model"),
+        "WHOLEMEM_SUMMARIZER_API_KEY": ("summarizer_llm", "api_key"),
         "WHOLEMEM_EMBEDDER_PROVIDER": ("embedder", "provider"),
         "WHOLEMEM_EMBEDDER_MODEL": ("embedder", "model"),
         "WHOLEMEM_EMBEDDER_BASE_URL": ("embedder", "base_url"),

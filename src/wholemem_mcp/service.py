@@ -90,7 +90,7 @@ class WholeMemService:
                 self.sp_process = None
 
         self.screenpipe_client = ScreenpipeClient(cfg.screenpipe)
-        self.summarizer = Summarizer(cfg.llm)
+        self.summarizer = Summarizer(cfg.summarizer_llm, cfg.llm)
         self.memory = MemoryStore(cfg)
         self.obsidian = ObsidianWriter(cfg.obsidian)
 
