@@ -580,6 +580,70 @@ async def remember_this(params: RememberInput) -> str:
 # Entrypoint
 # ---------------------------------------------------------------------------
 
+def _build_combined_app() -> Any:
+    """Build a Starlette app serving both SSE and streamable-http transports.
+
+    Endpoints:
+      POST /mcp           — streamable-http (Warp, newer clients)
+      GET  /sse           — SSE event stream (Claude Desktop, AnythingLLM)
+      POST /messages/     — SSE message posting
+      GET  /health        — component health JSON
+      POST /control/...   — control endpoints
+      POST /api/...       — API endpoints for the Streamlit UI
+    """
+    import contextlib
+
+    from starlette.applications import Starlette
+    from starlette.routing import Mount, Route
+
+    from mcp.server.sse import SseServerTransport
+    from mcp.server.fastmcp.server import StreamableHTTPASGIApp
+    from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
+
+    mcp_server = mcp._mcp_server
+
+    # --- Streamable HTTP handler ---
+    session_manager = StreamableHTTPSessionManager(
+        app=mcp_server,
+        json_response=mcp.settings.json_response,
+        stateless=mcp.settings.stateless_http,
+    )
+    streamable_asgi = StreamableHTTPASGIApp(session_manager)
+
+    # --- SSE handler ---
+    sse_transport = SseServerTransport("/messages/")
+
+    async def handle_sse(request: Request) -> Response:
+        async with sse_transport.connect_sse(
+            request.scope, request.receive, request._send,
+        ) as streams:
+            await mcp_server.run(
+                streams[0],
+                streams[1],
+                mcp_server.create_initialization_options(),
+            )
+        return Response()
+
+    # --- Combined routes ---
+    routes: list[Route | Mount] = [
+        Route("/mcp", endpoint=streamable_asgi),
+        Route("/sse", endpoint=handle_sse, methods=["GET"]),
+        Mount("/messages/", app=sse_transport.handle_post_message),
+    ]
+    routes.extend(mcp._custom_starlette_routes)
+
+    @contextlib.asynccontextmanager
+    async def lifespan(app):
+        async with session_manager.run():
+            yield
+
+    return Starlette(
+        debug=mcp.settings.debug,
+        routes=routes,
+        lifespan=lifespan,
+    )
+
+
 async def _run_server() -> None:
     """Start the service, then serve MCP + REST over HTTP."""
     global _service
@@ -588,18 +652,11 @@ async def _run_server() -> None:
     _service = WholeMemService(cfg)
     await _service.start()
 
-    # Configure transport from config
-    transport = cfg.server.transport
     mcp.settings.host = cfg.server.host
     mcp.settings.port = cfg.server.port
 
-    logger.info(
-        "WholeMem server starting on %s:%d (transport=%s)",
-        cfg.server.host, cfg.server.port, transport,
-    )
-
-    if transport == "stdio":
-        # stdio fallback — no HTTP server
+    if cfg.server.transport == "stdio":
+        logger.info("WholeMem server starting (transport=stdio)")
         try:
             await mcp.run_stdio_async()
         finally:
@@ -607,17 +664,20 @@ async def _run_server() -> None:
             _service = None
         return
 
+    host, port = cfg.server.host, cfg.server.port
+    logger.info("WholeMem server starting on %s:%d", host, port)
+    logger.info("  Streamable HTTP: http://%s:%d/mcp", host, port)
+    logger.info("  SSE:             http://%s:%d/sse", host, port)
+    logger.info("  Health:          http://%s:%d/health", host, port)
+
     import uvicorn
 
-    if transport == "sse":
-        app = mcp.sse_app()
-    else:
-        app = mcp.streamable_http_app()
+    app = _build_combined_app()
 
     uv_config = uvicorn.Config(
         app,
-        host=cfg.server.host,
-        port=cfg.server.port,
+        host=host,
+        port=port,
         log_level="info",
     )
     server = uvicorn.Server(uv_config)
