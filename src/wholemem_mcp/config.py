@@ -23,6 +23,10 @@ class ScreenpipeConfig(BaseModel):
     managed: bool = Field(default=True, description="Start/stop Screenpipe process with the MCP server")
     command: str = Field(default="npx screenpipe@latest", description="Command to launch Screenpipe")
     disable_telemetry: bool = Field(default=True, description="Pass --disable-telemetry to Screenpipe")
+    extra_args: List[str] = Field(
+        default=["--disable-audio", "--use-all-monitors"],
+        description="Additional CLI flags passed to the Screenpipe record command",
+    )
 
 
 class LLMConfig(BaseModel):
@@ -124,6 +128,7 @@ def _env_overrides(cfg: WholeMemConfig) -> WholeMemConfig:
         "WHOLEMEM_SCREENPIPE_MANAGED": ("screenpipe", "managed"),
         "WHOLEMEM_SCREENPIPE_COMMAND": ("screenpipe", "command"),
         "WHOLEMEM_SCREENPIPE_DISABLE_TELEMETRY": ("screenpipe", "disable_telemetry"),
+        "WHOLEMEM_SCREENPIPE_EXTRA_ARGS": ("screenpipe", "extra_args"),
         "WHOLEMEM_LLM_BASE_URL": ("llm", "base_url"),
         "WHOLEMEM_LLM_MODEL": ("llm", "model"),
         "WHOLEMEM_LLM_API_KEY": ("llm", "api_key"),

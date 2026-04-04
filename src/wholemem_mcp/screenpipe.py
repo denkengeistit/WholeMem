@@ -42,6 +42,10 @@ class ScreenpipeProcess:
         if self._cfg.disable_telemetry:
             args.append("--disable-telemetry")
 
+        # Extra CLI flags (e.g. --disable-audio, --use-all-monitors)
+        if self._cfg.extra_args:
+            args.extend(self._cfg.extra_args)
+
         return args
 
     async def start(self, timeout: float = 30.0) -> None:

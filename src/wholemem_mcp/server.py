@@ -26,7 +26,6 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 import anyio
-from pydantic import BaseModel, Field
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
@@ -211,56 +210,7 @@ async def api_fix(request: Request) -> Response:
 
 
 # ---------------------------------------------------------------------------
-# Input models
-# ---------------------------------------------------------------------------
-
-class BriefingInput(BaseModel):
-    """Input for what_are_we_doing."""
-    workspace: str = Field(..., description="Absolute path to the workspace directory.")
-    query: Optional[str] = Field(default=None, description="Optional topic hint for mem0 search.")
-    depth: str = Field(default="brief", description="'brief' (200-400 words) or 'full'.")
-
-
-class FileHistoryInput(BaseModel):
-    """Input for what_happened."""
-    workspace: str = Field(..., description="Absolute path to the workspace.")
-    path: Optional[str] = Field(default=None, description="Relative file/directory path.")
-    minutes: int = Field(default=60, description="Look back N minutes.", ge=1, le=1440)
-    agent: Optional[str] = Field(default=None, description="Filter to a specific agent ID.")
-    limit: int = Field(default=20, description="Max versions to return.", ge=1, le=100)
-
-
-class NarrativeInput(BaseModel):
-    """Input for what_did_we_do."""
-    minutes: int = Field(default=60, description="How far back to look.", ge=1, le=1440)
-    workspace: Optional[str] = Field(default=None, description="Scope file changes to this workspace.")
-    focus: Optional[str] = Field(default=None, description="Topic filter for the narrative.")
-
-
-class FixInput(BaseModel):
-    """Input for fix_this."""
-    workspace: str = Field(..., description="Absolute path to the workspace.")
-    description: str = Field(..., description="Natural language problem description.")
-    dry_run: bool = Field(default=True, description="If true, show plan without executing.")
-
-
-class LogCompletionInput(BaseModel):
-    """Input for we_did_this."""
-    summary: str = Field(..., description="What was accomplished.", min_length=1)
-    workspace: Optional[str] = Field(default=None, description="Workspace to link the fact to.")
-    task_id: Optional[str] = Field(default=None, description="TASKS.md 🆔 ID to mark complete.")
-    append_note: bool = Field(default=False, description="Append to today's daily note.")
-
-
-class RememberInput(BaseModel):
-    """Input for remember_this."""
-    content: str = Field(..., description="Fact or observation to store.", min_length=1)
-    category: Optional[str] = Field(default=None, description="Optional tag.")
-    source: Optional[str] = Field(default="manual", description="Provenance label.")
-
-
-# ---------------------------------------------------------------------------
-# Tools — same handlers as before, using lifespan context
+# Tools — flat parameter signatures for maximum model compatibility
 # ---------------------------------------------------------------------------
 
 @mcp.tool(
@@ -273,11 +223,20 @@ class RememberInput(BaseModel):
         "openWorldHint": True,
     },
 )
-async def what_are_we_doing(params: BriefingInput) -> str:
+async def what_are_we_doing(
+    workspace: str,
+    query: Optional[str] = None,
+    depth: str = "brief",
+) -> str:
     """Get an orientation briefing for a workspace.
 
     Returns workspace state, open tasks, relevant memories, and suggested
     next steps. Call this at the start of any session.
+
+    Args:
+        workspace: Absolute path to the workspace directory.
+        query: Optional topic hint for mem0 search.
+        depth: 'brief' (200-400 words) or 'full'.
     """
     ctx = mcp.get_context().request_context.lifespan_context
     oracle_obj = ctx["oracle"]
@@ -289,7 +248,7 @@ async def what_are_we_doing(params: BriefingInput) -> str:
     if oracle_obj:
         try:
             result = await oracle_obj.briefing(
-                agent_name="agent", task=params.query, focus=params.query,
+                agent_name="agent", task=query, focus=query,
             )
             parts.append(result["briefing"])
         except Exception as exc:
@@ -310,7 +269,7 @@ async def what_are_we_doing(params: BriefingInput) -> str:
         except Exception:
             pass
 
-    search_query = params.query or "recent activity"
+    search_query = query or "recent activity"
     try:
         memories = memory.search(query=search_query, limit=5)
         if memories:
@@ -334,10 +293,23 @@ async def what_are_we_doing(params: BriefingInput) -> str:
         "openWorldHint": False,
     },
 )
-async def what_happened(params: FileHistoryInput) -> str:
+async def what_happened(
+    workspace: str,
+    path: Optional[str] = None,
+    minutes: int = 60,
+    agent: Optional[str] = None,
+    limit: int = 20,
+) -> str:
     """Query file-level change history from the version store.
 
     Returns a JSON array of version records. No SLM involved.
+
+    Args:
+        workspace: Absolute path to the workspace.
+        path: Relative file/directory path.
+        minutes: Look back N minutes (1-1440, default 60).
+        agent: Filter to a specific agent ID.
+        limit: Max versions to return (1-100, default 20).
     """
     ctx = mcp.get_context().request_context.lifespan_context
     version_store = ctx["version_store"]
@@ -345,18 +317,18 @@ async def what_happened(params: FileHistoryInput) -> str:
     if version_store is None:
         return json.dumps({"error": "Watcher not enabled"})
 
-    since = time.time() - (params.minutes * 60)
+    since = time.time() - (minutes * 60)
 
-    if params.path:
+    if path:
         entries = await version_store.get_history(
-            params.path, limit=params.limit, since_timestamp=since,
+            path, limit=limit, since_timestamp=since,
         )
-    elif params.agent:
-        entries = await version_store.get_changes_by_agent(params.agent, since=since)
-        entries = entries[:params.limit]
+    elif agent:
+        entries = await version_store.get_changes_by_agent(agent, since=since)
+        entries = entries[:limit]
     else:
         entries = await version_store.get_changes_since(since)
-        entries = entries[:params.limit]
+        entries = entries[:limit]
 
     results = []
     for e in entries:
@@ -381,10 +353,19 @@ async def what_happened(params: FileHistoryInput) -> str:
         "openWorldHint": True,
     },
 )
-async def what_did_we_do(params: NarrativeInput) -> str:
+async def what_did_we_do(
+    minutes: int = 60,
+    workspace: Optional[str] = None,
+    focus: Optional[str] = None,
+) -> str:
     """Narrative history synthesized across screen captures, memory, and file changes.
 
     Interleaves Screenpipe activity and file changes chronologically.
+
+    Args:
+        minutes: How far back to look (1-1440, default 60).
+        workspace: Scope file changes to this workspace path.
+        focus: Topic filter for the narrative.
     """
     ctx = mcp.get_context().request_context.lifespan_context
     screenpipe = ctx["screenpipe"]
@@ -395,7 +376,7 @@ async def what_did_we_do(params: NarrativeInput) -> str:
     sources: list[str] = []
 
     try:
-        items = await screenpipe.get_recent_activity(minutes=params.minutes)
+        items = await screenpipe.get_recent_activity(minutes=minutes)
         if items:
             from wholemem_mcp.summarizer import _flatten_items
             transcript = _flatten_items(items)
@@ -403,8 +384,8 @@ async def what_did_we_do(params: NarrativeInput) -> str:
     except Exception as exc:
         logger.warning("Screenpipe fetch failed: %s", exc)
 
-    if version_store and params.workspace:
-        since = time.time() - (params.minutes * 60)
+    if version_store and workspace:
+        since = time.time() - (minutes * 60)
         try:
             changes = await version_store.get_changes_since(since)
             if changes:
@@ -419,8 +400,8 @@ async def what_did_we_do(params: NarrativeInput) -> str:
             logger.warning("Version store query failed: %s", exc)
 
     try:
-        query = params.focus or "recent activity"
-        memories = memory.search(query=query, limit=5)
+        q = focus or "recent activity"
+        memories = memory.search(query=q, limit=5)
         if memories:
             mem_lines = ["## Stored Facts"]
             for m in memories:
@@ -452,10 +433,19 @@ async def what_did_we_do(params: NarrativeInput) -> str:
         "openWorldHint": True,
     },
 )
-async def fix_this(params: FixInput) -> str:
+async def fix_this(
+    workspace: str,
+    description: str,
+    dry_run: bool = True,
+) -> str:
     """Restore files to a working state based on a problem description.
 
     Defaults to dry_run=true — call again with dry_run=false to execute.
+
+    Args:
+        workspace: Absolute path to the workspace.
+        description: Natural language problem description.
+        dry_run: If true, show plan without executing.
     """
     ctx = mcp.get_context().request_context.lifespan_context
     oracle_obj = ctx["oracle"]
@@ -465,7 +455,7 @@ async def fix_this(params: FixInput) -> str:
         return "Error: Watcher/oracle not enabled. Cannot restore files."
 
     try:
-        result = await oracle_obj.fix(problem=params.description, dry_run=params.dry_run)
+        result = await oracle_obj.fix(problem=description, dry_run=dry_run)
     except Exception as exc:
         return f"Restoration failed: {exc}"
 
@@ -476,11 +466,11 @@ async def fix_this(params: FixInput) -> str:
             parts.append(f"  - {f['path']} → v{f.get('to_version', '?')}")
     parts.append(f"\n{result['explanation']}")
 
-    if not params.dry_run and task_store:
+    if not dry_run and task_store:
         try:
             tasks = task_store.get_tasks()
             for t in tasks:
-                if params.description.lower() in t.text.lower():
+                if description.lower() in t.text.lower():
                     task_store.complete_task(line_num=t.line_num)
                     parts.append(f"\n✅ Task completed: {t.text[:80]}")
                     break
@@ -500,45 +490,56 @@ async def fix_this(params: FixInput) -> str:
         "openWorldHint": False,
     },
 )
-async def we_did_this(params: LogCompletionInput) -> str:
+async def we_did_this(
+    summary: str,
+    workspace: Optional[str] = None,
+    task_id: Optional[str] = None,
+    append_note: bool = False,
+) -> str:
     """Log completed work to memory, optionally mark a task complete
     and/or append to today's daily note.
+
+    Args:
+        summary: What was accomplished.
+        workspace: Workspace to link the fact to.
+        task_id: TASKS.md task ID to mark complete.
+        append_note: Append to today's daily note.
     """
     ctx = mcp.get_context().request_context.lifespan_context
     memory = ctx["memory"]
     obsidian = ctx["obsidian"]
-    task_store = ctx["task_store"]
+    task_store_obj = ctx["task_store"]
 
     confirmations: list[str] = []
 
     metadata: Dict[str, Any] = {"source": "we_did_this"}
-    if params.workspace:
-        metadata["workspace"] = params.workspace
+    if workspace:
+        metadata["workspace"] = workspace
 
     try:
-        result = memory.add(content=params.summary, metadata=metadata)
+        result = memory.add(content=summary, metadata=metadata)
         ids = [r.get("id", "?") for r in result.get("results", [])]
         confirmations.append(f"Memory stored (IDs: {', '.join(ids)})")
     except Exception as exc:
         confirmations.append(f"Memory write failed: {exc}")
 
-    if params.task_id:
+    if task_id:
         from wholemem_mcp.tasks import TaskStore
-        ts = task_store
-        if ts is None and params.workspace:
-            ts = TaskStore(Path(params.workspace).expanduser())
+        ts = task_store_obj
+        if ts is None and workspace:
+            ts = TaskStore(Path(workspace).expanduser())
         if ts:
             try:
-                ts.complete_task(task_id=params.task_id)
-                confirmations.append(f"Task {params.task_id} marked complete")
+                ts.complete_task(task_id=task_id)
+                confirmations.append(f"Task {task_id} marked complete")
             except Exception as exc:
                 confirmations.append(f"Task completion failed: {exc}")
         else:
             confirmations.append("Cannot complete task: no workspace provided")
 
-    if params.append_note:
+    if append_note:
         try:
-            path = obsidian.append_entry(f"- {params.summary}")
+            path = obsidian.append_entry(f"- {summary}")
             confirmations.append(f"Appended to daily note: {path}")
         except Exception as exc:
             confirmations.append(f"Daily note write failed: {exc}")
@@ -556,20 +557,29 @@ async def we_did_this(params: LogCompletionInput) -> str:
         "openWorldHint": False,
     },
 )
-async def remember_this(params: RememberInput) -> str:
+async def remember_this(
+    content: str,
+    category: Optional[str] = None,
+    source: Optional[str] = "manual",
+) -> str:
     """Store an arbitrary fact or observation in mem0.
 
     No task semantics, no file linkage, no daily note write.
+
+    Args:
+        content: Fact or observation to store.
+        category: Optional tag.
+        source: Provenance label.
     """
     ctx = mcp.get_context().request_context.lifespan_context
     memory = ctx["memory"]
 
-    metadata: Dict[str, Any] = {"source": params.source or "manual"}
-    if params.category:
-        metadata["category"] = params.category
+    metadata: Dict[str, Any] = {"source": source or "manual"}
+    if category:
+        metadata["category"] = category
 
     try:
-        result = memory.add(content=params.content, metadata=metadata)
+        result = memory.add(content=content, metadata=metadata)
         ids = [r.get("id", "?") for r in result.get("results", [])]
         return f"Stored (IDs: {', '.join(ids)})"
     except Exception as exc:
