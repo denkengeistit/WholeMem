@@ -55,6 +55,7 @@ class WholeMemMenuBar:
 
         self.server_url = _server_url()
         self.process: subprocess.Popen[bytes] | None = None
+        self.ui_process: subprocess.Popen[bytes] | None = None
         self.app = rumps.App("WholeMem", title="WM", quit_button=None)
         self.status_item = rumps.MenuItem("Status: checking…")
         self.start_item = rumps.MenuItem("Start WholeMem", callback=self.start_server)
@@ -102,6 +103,9 @@ class WholeMemMenuBar:
     def _server_process_running(self) -> bool:
         return self.process is not None and self.process.poll() is None
 
+    def _ui_process_running(self) -> bool:
+        return self.ui_process is not None and self.ui_process.poll() is None
+
     def refresh_status(self, _: Any) -> None:
         """Update menu item labels based on server health."""
         health = self._health()
@@ -139,9 +143,11 @@ class WholeMemMenuBar:
     def start_server(self, _: Any) -> None:
         """Start the WholeMem server in the background."""
         if self._health() is not None:
+            self._start_ui_process(open_browser=False)
             self.refresh_status(None)
             return
         self._start_server_process()
+        self._start_ui_process(open_browser=False)
         time.sleep(0.5)
         self.refresh_status(None)
 
@@ -228,9 +234,17 @@ class WholeMemMenuBar:
 
     def open_ui(self, _: Any) -> None:
         """Launch the Streamlit UI in a browser."""
+        self._start_ui_process(open_browser=True)
+
+    def _start_ui_process(self, open_browser: bool) -> None:
+        """Launch the Streamlit UI if this app has not started one."""
+        if self._ui_process_running():
+            if open_browser:
+                webbrowser.open(STREAMLIT_URL)
+            return
         env = os.environ.copy()
         env["PATH"] = f"{GUI_PATH}:{env.get('PATH', '')}"
-        subprocess.Popen(
+        self.ui_process = subprocess.Popen(
             [sys.executable, "-m", "wholemem_mcp.ui.run"],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
@@ -238,12 +252,18 @@ class WholeMemMenuBar:
             start_new_session=True,
             env=env,
         )
-        webbrowser.open(STREAMLIT_URL)
+        if open_browser:
+            webbrowser.open(STREAMLIT_URL)
 
     def quit_app(self, _: Any) -> None:
         """Quit the menu bar app, leaving externally managed servers alone."""
         if self._server_process_running():
             self.stop_server(None)
+        if self._ui_process_running() and self.ui_process is not None:
+            try:
+                os.killpg(self.ui_process.pid, signal.SIGTERM)
+            except Exception:
+                pass
         rumps.quit_application()
 
 
