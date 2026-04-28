@@ -7,6 +7,10 @@ import logging
 import os
 import shlex
 import signal
+import subprocess
+import shutil
+from pathlib import Path
+from collections import deque
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
@@ -28,10 +32,25 @@ class ScreenpipeProcess:
     def __init__(self, config: ScreenpipeConfig) -> None:
         self._cfg = config
         self._process: Optional[asyncio.subprocess.Process] = None
+        self._stderr_task: Optional[asyncio.Task[None]] = None
+        self._stderr_tail: deque[str] = deque(maxlen=50)
 
     def _build_args(self) -> List[str]:
         """Build the argument list for the Screenpipe subprocess."""
         parts = shlex.split(self._cfg.command)
+        if parts and os.path.sep not in parts[0]:
+            resolved = shutil.which(parts[0])
+            if resolved is None and parts[0] == "npx":
+                for candidate in (
+                    "/opt/homebrew/bin/npx",
+                    "/usr/local/bin/npx",
+                    str(Path.home() / ".local/bin/npx"),
+                ):
+                    if os.path.exists(candidate):
+                        resolved = candidate
+                        break
+            if resolved is not None:
+                parts[0] = resolved
         args = [*parts, "record"]
 
         # Extract port from the configured URL
@@ -48,6 +67,38 @@ class ScreenpipeProcess:
 
         return args
 
+    async def _drain_stderr(self) -> None:
+        """Continuously drain subprocess stderr so verbose Screenpipe logs don't block."""
+        if self._process is None or self._process.stderr is None:
+            return
+
+        try:
+            while True:
+                line = await self._process.stderr.readline()
+                if not line:
+                    break
+                text = line.decode(errors="replace").rstrip()
+                self._stderr_tail.append(text)
+                logger.debug("screenpipe: %s", text)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.debug("Error draining Screenpipe stderr: %s", exc)
+
+    def _stderr_excerpt(self) -> str:
+        """Return recent Screenpipe stderr lines for diagnostics."""
+        return "\n".join(self._stderr_tail)[-1000:]
+
+    async def _stop_stderr_task(self) -> None:
+        """Stop the stderr drain task if it is running."""
+        if self._stderr_task is not None:
+            self._stderr_task.cancel()
+            try:
+                await self._stderr_task
+            except asyncio.CancelledError:
+                pass
+            self._stderr_task = None
+
     async def start(self, timeout: float = 30.0) -> None:
         """Launch Screenpipe and wait until its /health endpoint responds."""
         args = self._build_args()
@@ -60,6 +111,7 @@ class ScreenpipeProcess:
             stderr=asyncio.subprocess.PIPE,
             start_new_session=True,
         )
+        self._stderr_task = asyncio.create_task(self._drain_stderr())
 
         # Poll /health until ready
         health_url = f"{self._cfg.url.rstrip('/')}/health"
@@ -67,12 +119,9 @@ class ScreenpipeProcess:
         while asyncio.get_event_loop().time() < deadline:
             # Check the process hasn't crashed
             if self._process.returncode is not None:
-                stderr = b""
-                if self._process.stderr:
-                    stderr = await self._process.stderr.read()
                 raise RuntimeError(
                     f"Screenpipe exited with code {self._process.returncode}: "
-                    f"{stderr.decode(errors='replace')[:500]}"
+                    f"{self._stderr_excerpt()}"
                 )
             try:
                 async with httpx.AsyncClient(timeout=2.0) as client:
@@ -87,7 +136,8 @@ class ScreenpipeProcess:
         # Timed out — kill the process we started
         await self.stop()
         raise TimeoutError(
-            f"Screenpipe did not become ready within {timeout}s"
+            f"Screenpipe did not become ready within {timeout}s. "
+            f"Recent logs: {self._stderr_excerpt()}"
         )
 
     def _find_port_pid(self) -> int | None:
@@ -123,6 +173,7 @@ class ScreenpipeProcess:
                 logger.info("Found orphaned Screenpipe on port (pid %d), killing.", port_pid)
                 os.kill(port_pid, signal.SIGTERM)
                 await asyncio.sleep(1.0)
+            await self._stop_stderr_task()
             return
 
         pid = self._process.pid
@@ -137,22 +188,20 @@ class ScreenpipeProcess:
         try:
             await asyncio.wait_for(self._process.wait(), timeout=5.0)
         except asyncio.TimeoutError:
-            pass
-
-        # Escalate to SIGKILL on the process group
-        logger.warning("Screenpipe did not exit in 5s, killing process group.")
-        try:
-            os.killpg(os.getpgid(pid), signal.SIGKILL)
-        except (ProcessLookupError, OSError):
+            # Escalate to SIGKILL on the process group
+            logger.warning("Screenpipe did not exit in 5s, killing process group.")
             try:
-                self._process.kill()
-            except ProcessLookupError:
-                pass
+                os.killpg(os.getpgid(pid), signal.SIGKILL)
+            except (ProcessLookupError, OSError):
+                try:
+                    self._process.kill()
+                except ProcessLookupError:
+                    pass
 
-        try:
-            await asyncio.wait_for(self._process.wait(), timeout=3.0)
-        except asyncio.TimeoutError:
-            pass
+            try:
+                await asyncio.wait_for(self._process.wait(), timeout=3.0)
+            except asyncio.TimeoutError:
+                pass
 
         # Final safety net: kill whatever is still on the port
         port_pid = self._find_port_pid()
@@ -162,6 +211,8 @@ class ScreenpipeProcess:
                 os.kill(port_pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
+
+        await self._stop_stderr_task()
 
         logger.info("Screenpipe stopped.")
 
@@ -174,16 +225,55 @@ class ScreenpipeClient:
     """Thin async wrapper around Screenpipe's REST endpoints."""
 
     def __init__(self, config: ScreenpipeConfig) -> None:
+        self._cfg = config
         self.base_url = config.url.rstrip("/")
         self._timeout = 30.0
+        self._api_key = (
+            config.api_key
+            or os.environ.get("SCREENPIPE_LOCAL_API_KEY", "")
+            or self._load_local_api_key()
+        )
 
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
 
-    async def _get(self, path: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    def _load_local_api_key(self) -> str:
+        """Fetch the local Screenpipe API token from the configured CLI."""
+        try:
+            args = [*shlex.split(self._cfg.command), "auth", "token"]
+            result = subprocess.run(
+                args,
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+        except Exception as exc:
+            logger.debug("Unable to load Screenpipe API token: %s", exc)
+            return ""
+
+        if result.returncode != 0:
+            logger.debug("Screenpipe API token command failed with code %d.", result.returncode)
+            return ""
+
+        token = result.stdout.strip()
+        if token:
+            logger.info("Loaded Screenpipe API token from local CLI.")
+        return token
+
+    async def _get(
+        self,
+        path: str,
+        params: Optional[Dict[str, Any]] = None,
+        *,
+        auth: bool = True,
+    ) -> Dict[str, Any]:
+        headers = {}
+        if auth and self._api_key:
+            headers["Authorization"] = f"Bearer {self._api_key}"
         async with httpx.AsyncClient(timeout=self._timeout) as client:
-            resp = await client.get(f"{self.base_url}{path}", params=params)
+            resp = await client.get(f"{self.base_url}{path}", params=params, headers=headers)
             resp.raise_for_status()
             return resp.json()
 
@@ -193,7 +283,7 @@ class ScreenpipeClient:
 
     async def health(self) -> Dict[str, Any]:
         """Return Screenpipe server health status."""
-        return await self._get("/health")
+        return await self._get("/health", auth=False)
 
     async def search(
         self,

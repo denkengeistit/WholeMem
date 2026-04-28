@@ -22,6 +22,7 @@ class ScreenpipeConfig(BaseModel):
     url: str = Field(default="http://localhost:3030", description="Screenpipe REST API base URL")
     managed: bool = Field(default=True, description="Start/stop Screenpipe process with the MCP server")
     command: str = Field(default="npx screenpipe@latest", description="Command to launch Screenpipe")
+    api_key: str = Field(default="", description="Screenpipe local API bearer token")
     disable_telemetry: bool = Field(default=True, description="Pass --disable-telemetry to Screenpipe")
     extra_args: List[str] = Field(
         default=["--disable-audio", "--use-all-monitors"],
@@ -151,6 +152,7 @@ def _env_overrides(cfg: WholeMemConfig) -> WholeMemConfig:
         "WHOLEMEM_SCREENPIPE_URL": ("screenpipe", "url"),
         "WHOLEMEM_SCREENPIPE_MANAGED": ("screenpipe", "managed"),
         "WHOLEMEM_SCREENPIPE_COMMAND": ("screenpipe", "command"),
+        "WHOLEMEM_SCREENPIPE_API_KEY": ("screenpipe", "api_key"),
         "WHOLEMEM_SCREENPIPE_DISABLE_TELEMETRY": ("screenpipe", "disable_telemetry"),
         "WHOLEMEM_SCREENPIPE_EXTRA_ARGS": ("screenpipe", "extra_args"),
         "WHOLEMEM_LLM_BASE_URL": ("llm", "base_url"),

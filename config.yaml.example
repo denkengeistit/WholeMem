@@ -6,6 +6,7 @@ screenpipe:
   url: "http://localhost:3030"
   managed: true                         # start/stop Screenpipe with the MCP server
   command: "npx screenpipe@latest"       # command to launch Screenpipe
+  api_key: ""                            # optional; or set WHOLEMEM_SCREENPIPE_API_KEY / SCREENPIPE_LOCAL_API_KEY
   disable_telemetry: true               # pass --disable-telemetry to Screenpipe
 
 llm:
