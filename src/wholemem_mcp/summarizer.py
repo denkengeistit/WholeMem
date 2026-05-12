@@ -7,6 +7,8 @@ in LM Studio, vLLM, Ollama, or any server exposing /v1/chat/completions.
 from __future__ import annotations
 
 from typing import Any, Dict, List
+import logging
+from datetime import datetime
 
 from openai import AsyncOpenAI
 
@@ -26,6 +28,16 @@ def _flatten_items(items: List[Dict[str, Any]]) -> str:
     (>80% overlap), keeping only the first occurrence with a count annotation.
     Audio and UI events are never deduplicated.
     """
+    def _format_timestamp(ts_str: str) -> str:
+        if not ts_str:
+            return ""
+        try:
+            # Screenpipe timestamps are ISO 8601 UTC strings (e.g., "2023-01-01T00:00:00Z")
+            dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+            return dt.astimezone().strftime("%H:%M")
+        except Exception:
+            return ts_str
+
     lines: List[str] = []
     # Track last OCR per app for dedup
     last_ocr: Dict[str, str] = {}  # app -> last text
@@ -63,7 +75,7 @@ def _flatten_items(items: List[Dict[str, Any]]) -> str:
         content = item.get("content", {})
 
         if ctype == "OCR":
-            ts = content.get("timestamp", "")
+            ts = _format_timestamp(content.get("timestamp", ""))
             app = content.get("app_name", "unknown")
             text = content.get("text", "").strip()
             if not text:
@@ -78,14 +90,14 @@ def _flatten_items(items: List[Dict[str, Any]]) -> str:
                 ocr_counts[app] = 1
 
         elif ctype == "Audio":
-            ts = content.get("timestamp", "")
+            ts = _format_timestamp(content.get("timestamp", ""))
             text = content.get("transcription", "").strip()
             device = content.get("device_name", "mic")
             if text:
                 lines.append(f"[{ts}] (audio/{device}) {text[:500]}")
 
         elif ctype == "UI":
-            ts = content.get("timestamp", "")
+            ts = _format_timestamp(content.get("timestamp", ""))
             app = content.get("app_name", "unknown")
             text = content.get("text", "").strip()
             if text:
@@ -97,7 +109,6 @@ def _flatten_items(items: List[Dict[str, Any]]) -> str:
 
     result = "\n".join(lines) if lines else "(no activity captured)"
     if result != "(no activity captured)":
-        import logging
         logging.getLogger("wholemem.summarizer").info(
             "Transcript: %d items → %d lines, %d chars",
             len(items), len(lines), len(result),
