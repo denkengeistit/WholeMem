@@ -50,6 +50,10 @@ class SummarizerConfig(BaseModel):
     api_key: str = Field(default="", description="API key. Empty = use llm.api_key")
     temperature: float = Field(default=0.3, description="Sampling temperature")
     max_tokens: int = Field(default=512, description="Max tokens to generate (smaller for summaries)")
+    system_prompt: str = Field(
+        default="",
+        description="Custom system prompt for the summarizer. If empty, defaults are used."
+    )
 
 
 class EmbedderConfig(BaseModel):
@@ -161,6 +165,7 @@ def _env_overrides(cfg: WholeMemConfig) -> WholeMemConfig:
         "WHOLEMEM_SUMMARIZER_BASE_URL": ("summarizer_llm", "base_url"),
         "WHOLEMEM_SUMMARIZER_MODEL": ("summarizer_llm", "model"),
         "WHOLEMEM_SUMMARIZER_API_KEY": ("summarizer_llm", "api_key"),
+        "WHOLEMEM_SUMMARIZER_SYSTEM_PROMPT": ("summarizer_llm", "system_prompt"),
         "WHOLEMEM_EMBEDDER_PROVIDER": ("embedder", "provider"),
         "WHOLEMEM_EMBEDDER_MODEL": ("embedder", "model"),
         "WHOLEMEM_EMBEDDER_BASE_URL": ("embedder", "base_url"),

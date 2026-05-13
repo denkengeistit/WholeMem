@@ -130,6 +130,7 @@ class Summarizer:
         self._model = summarizer_cfg.model or llm_cfg.model
         self._temperature = summarizer_cfg.temperature
         self._max_tokens = summarizer_cfg.max_tokens
+        self._summarizer_cfg = summarizer_cfg
 
         self._client = AsyncOpenAI(
             base_url=base_url,
@@ -169,11 +170,12 @@ class Summarizer:
             messages=[
                 {
                     "role": "system",
-                    "content": (
+                    "content": self._summarizer_cfg.system_prompt or (
                         "You are a concise activity summarizer. Given timestamped screen "
                         "and audio captures, produce a brief summary of what the user was "
                         "doing. Group by topic/app. Keep it under 200 words. "
                         "Preserve important timestamps. Output plain text. "
+                        "DO NOT include any preamble, analysis, or explanation of your thought process. "
                         "/no_think"
                     ),
                 },
@@ -202,13 +204,14 @@ class Summarizer:
             messages=[
                 {
                     "role": "system",
-                    "content": (
+                    "content": self._summarizer_cfg.system_prompt or (
                         "You are a personal knowledge assistant. Given timestamped screen "
                         "and audio captures from a user's computer, produce a Markdown "
                         "summary for their daily note. Use bullet points grouped by "
                         "topic or application. Include timestamps in HH:MM format. "
                         "Be concise but capture key facts, decisions, and URLs. "
                         "Output only the Markdown bullet list, no heading. "
+                        "DO NOT include any preamble, analysis, or explanation of your thought process. "
                         "/no_think"
                     ),
                 },
