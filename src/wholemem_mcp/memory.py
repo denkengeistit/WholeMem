@@ -112,19 +112,24 @@ class MemoryStore:
         content: str,
         user_id: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
+        infer: bool = True,
     ) -> Dict[str, Any]:
         """Store a memory (fact / observation).
 
         Args:
-            content: Text to store.  mem0 will extract facts automatically.
+            content: Text to store.  mem0 will extract facts automatically
+                unless ``infer=False``, which stores the text verbatim
+                (reliable for explicit "remember this" calls — small local
+                extraction models often judge long technical content as
+                containing "no facts" and silently store nothing).
             user_id: Override the default user scope.
             metadata: Optional metadata dict (e.g. source, category).
 
         Returns:
-            mem0 add result with extracted memory IDs and events.
+            mem0 add result with memory IDs and events.
         """
         uid = user_id or self._user_id
-        kwargs: Dict[str, Any] = {"user_id": uid}
+        kwargs: Dict[str, Any] = {"user_id": uid, "infer": infer}
         if metadata:
             kwargs["metadata"] = metadata
         return self._memory.add(content, **kwargs)

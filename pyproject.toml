@@ -32,6 +32,7 @@ menubar = ["rumps>=0.4.0"]
 [project.scripts]
 wholemem-mcp = "wholemem_mcp.server:main"
 wholemem-server = "wholemem_mcp.server:main"
+wholemem-migrate = "wholemem_mcp.fs.migrate:main"
 wholemem-ui = "wholemem_mcp.ui.run:main"
 wholemem-menubar = "wholemem_mcp.ui.menubar:main"
 

@@ -120,16 +120,24 @@ async def run_daemon(
     memory: MemoryStore,
     obsidian: ObsidianWriter,
     version_store: VersionStore | None = None,
+    project_stores=None,
 ) -> None:
     """Run the background sync loop forever.
 
     This is meant to be started as an asyncio task and cancelled on shutdown.
+    ``version_store`` may be any object with ``get_changes_since`` (a single
+    store or the cross-project aggregate). ``project_stores`` enables the
+    periodic garbage-collection pass.
     """
+    import time as _time
+
     interval = config.daemon.interval_minutes * 60  # seconds
     logger.info(
         "WholeMem daemon started — syncing every %d minutes.",
         config.daemon.interval_minutes,
     )
+
+    last_gc = 0.0
 
     while True:
         try:
@@ -141,6 +149,28 @@ async def run_daemon(
             logger.info("Sync cycle complete: %s", status)
         except Exception as exc:
             logger.error("Unexpected error in sync cycle: %s", exc, exc_info=True)
+
+        # Periodic garbage collection ---------------------------------
+        if (
+            project_stores is not None
+            and config.gc.enabled
+            and _time.time() - last_gc >= config.gc.interval_minutes * 60
+        ):
+            try:
+                from wholemem_mcp.fs.gc import gc_all
+
+                stats = await gc_all(
+                    project_stores,
+                    config.watcher.exclude,
+                    retention_days=config.gc.retention_days,
+                    vacuum_threshold=config.gc.vacuum_threshold,
+                )
+                freed = sum(s.versions_deleted + s.blobs_deleted for s in stats)
+                if freed:
+                    logger.info("GC pass freed %d rows across %d projects", freed, len(stats))
+            except Exception:
+                logger.exception("GC pass failed")
+            last_gc = _time.time()
 
         await asyncio.sleep(interval)
 

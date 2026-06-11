@@ -8,12 +8,11 @@ hands batches to the version store.
 from __future__ import annotations
 
 import asyncio
-import fnmatch
 import logging
 import os
 import threading
 from pathlib import Path
-from typing import Sequence
+from typing import Awaitable, Callable, Optional, Sequence
 
 from watchdog.events import (
     FileCreatedEvent,
@@ -24,9 +23,13 @@ from watchdog.events import (
 )
 from watchdog.observers import Observer
 
+from wholemem_mcp.fs.exclude import dir_is_excluded, is_excluded
 from wholemem_mcp.fs.version_store import VersionStore
 
 log = logging.getLogger(__name__)
+
+#: Resolves a root-relative path to the VersionStore that should record it.
+StoreResolver = Callable[[str], Awaitable[VersionStore]]
 
 # Avoid circular import — SessionTracker is only used for type hints
 from typing import TYPE_CHECKING
@@ -72,12 +75,16 @@ class WAWDWatcher:
     def __init__(
         self,
         root: str | Path,
-        version_store: VersionStore,
+        version_store: VersionStore | None = None,
         exclude: Sequence[str] = (),
         session_tracker: SessionTracker | None = None,
+        store_resolver: Optional[StoreResolver] = None,
     ) -> None:
+        if version_store is None and store_resolver is None:
+            raise ValueError("Provide either version_store or store_resolver")
         self._root = Path(root).resolve()
         self._vs = version_store
+        self._store_resolver = store_resolver
         self._exclude = list(exclude)
         self._session_tracker = session_tracker
 
@@ -165,16 +172,13 @@ class WAWDWatcher:
             return None
 
     def _is_excluded(self, rel_path: str) -> bool:
-        parts = Path(rel_path).parts
-        for pattern in self._exclude:
-            # directory pattern — check each component
-            if pattern.endswith("/"):
-                if any(fnmatch.fnmatch(p, pattern.rstrip("/")) for p in parts):
-                    return True
-            else:
-                if fnmatch.fnmatch(Path(rel_path).name, pattern):
-                    return True
-        return False
+        return is_excluded(rel_path, self._exclude)
+
+    async def _store_for(self, rel: str) -> VersionStore:
+        """Resolve the version store that owns *rel* (per-project routing)."""
+        if self._store_resolver is not None:
+            return await self._store_resolver(rel)
+        return self._vs  # type: ignore[return-value]
 
     async def _drain_loop(self) -> None:
         """Periodically flush pending events to the version store."""
@@ -210,9 +214,10 @@ class WAWDWatcher:
 
     async def _version_one(self, rel: str, abs_path: str, op: str) -> None:
         agent_id, session_id = await self._resolve_attribution()
+        vs = await self._store_for(rel)
 
         if op == "delete":
-            await self._vs.record_delete(
+            await vs.record_delete(
                 path=rel,
                 agent_id=agent_id,
                 session_id=session_id,
@@ -226,7 +231,7 @@ class WAWDWatcher:
             content = path.read_bytes()
         except OSError:
             return
-        await self._vs.record_version(
+        await vs.record_version(
             path=rel,
             content=content,
             agent_id=agent_id,
@@ -237,10 +242,15 @@ class WAWDWatcher:
         """Walk the tree once and version every file (skipping excluded)."""
         count = 0
         for dirpath, dirnames, filenames in os.walk(self._root):
-            # prune excluded directories in-place
+            # prune excluded directories in-place — matched against the
+            # root-relative dir path so path-prefix patterns work too
+            rel_dir = self._relpath(dirpath) or ""
             dirnames[:] = [
                 d for d in dirnames
-                if not self._is_excluded(d + "/")
+                if not dir_is_excluded(
+                    f"{rel_dir}/{d}" if rel_dir and rel_dir != "." else d,
+                    self._exclude,
+                )
             ]
             for fname in filenames:
                 abs_path = os.path.join(dirpath, fname)
@@ -248,7 +258,8 @@ class WAWDWatcher:
                 if rel and not self._is_excluded(rel):
                     try:
                         content = Path(abs_path).read_bytes()
-                        await self._vs.record_version(
+                        vs = await self._store_for(rel)
+                        await vs.record_version(
                             path=rel,
                             content=content,
                             agent_id="wawd",

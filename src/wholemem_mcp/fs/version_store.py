@@ -76,9 +76,15 @@ class VersionEntry:
 class VersionStore:
     """File version history and snapshot management backed by SQLite."""
 
-    def __init__(self, db: aiosqlite.Connection, blob_store: BlobStore) -> None:
+    def __init__(
+        self,
+        db: aiosqlite.Connection,
+        blob_store: BlobStore,
+        history_depth: int = 3,
+    ) -> None:
         self._db = db
         self._blobs = blob_store
+        self._history_depth = max(1, history_depth)
 
     async def init_db(self) -> None:
         """Create tables and indices, enable WAL mode."""
@@ -346,19 +352,19 @@ class VersionStore:
         return [VersionEntry.from_row(r) for r in rows]
     
     async def _prune_old_versions(self, path: str) -> None:
-        """Keep only the 3 most recent versions for a given path."""
+        """Keep only the N most recent versions for a given path."""
         # Get all version IDs for this path, newest first
         cursor = await self._db.execute(
             "SELECT id, blob_hash FROM versions WHERE path = ? ORDER BY timestamp DESC",
             (path,),
         )
         rows = await cursor.fetchall()
-        
-        if len(rows) <= 3:
+
+        if len(rows) <= self._history_depth:
             return
-        
-        # Delete versions beyond the 3 most recent
-        to_delete = rows[3:]
+
+        # Delete versions beyond the N most recent
+        to_delete = rows[self._history_depth:]
         orphaned_hashes = [r[1] for r in to_delete if r[1] is not None]
         
         for row in to_delete:

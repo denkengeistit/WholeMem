@@ -25,7 +25,7 @@ class ScreenpipeConfig(BaseModel):
     api_key: str = Field(default="", description="Screenpipe local API bearer token")
     disable_telemetry: bool = Field(default=True, description="Pass --disable-telemetry to Screenpipe")
     extra_args: List[str] = Field(
-        default=["--disable-audio", "--use-all-monitors"],
+        default=["--disable-audio", "--monitor-id", "0"],
         description="Additional CLI flags passed to the Screenpipe record command",
     )
 
@@ -96,6 +96,13 @@ class VersioningConfig(BaseModel):
     history_depth: int = Field(default=3, description="Max versions kept per file")
 
 
+class GCConfig(BaseModel):
+    enabled: bool = Field(default=True, description="Run periodic garbage collection in the daemon")
+    retention_days: int = Field(default=30, description="Days a deleted file's history stays restorable before purge")
+    interval_minutes: int = Field(default=60, description="Minimum minutes between GC runs")
+    vacuum_threshold: int = Field(default=500, description="Freed rows per project that trigger a VACUUM")
+
+
 class OracleConfig(BaseModel):
     history_depth: int = Field(default=50, description="Max version entries in oracle context")
     session_timeout_minutes: int = Field(default=30, description="Idle timeout before session is completed")
@@ -121,6 +128,7 @@ class WholeMemConfig(BaseModel):
     daemon: DaemonConfig = Field(default_factory=DaemonConfig)
     watcher: WatcherConfig = Field(default_factory=WatcherConfig)
     versioning: VersioningConfig = Field(default_factory=VersioningConfig)
+    gc: GCConfig = Field(default_factory=GCConfig)
     oracle: OracleConfig = Field(default_factory=OracleConfig)
     server: ServerConfig = Field(default_factory=ServerConfig)
 
@@ -181,6 +189,10 @@ def _env_overrides(cfg: WholeMemConfig) -> WholeMemConfig:
         "WHOLEMEM_VERSIONING_COMPRESSION": ("versioning", "compression_level"),
         "WHOLEMEM_VERSIONING_DB_PATH": ("versioning", "db_path"),
         "WHOLEMEM_VERSIONING_HISTORY_DEPTH": ("versioning", "history_depth"),
+        "WHOLEMEM_GC_ENABLED": ("gc", "enabled"),
+        "WHOLEMEM_GC_RETENTION_DAYS": ("gc", "retention_days"),
+        "WHOLEMEM_GC_INTERVAL": ("gc", "interval_minutes"),
+        "WHOLEMEM_GC_VACUUM_THRESHOLD": ("gc", "vacuum_threshold"),
         "WHOLEMEM_ORACLE_HISTORY_DEPTH": ("oracle", "history_depth"),
         "WHOLEMEM_ORACLE_SESSION_TIMEOUT": ("oracle", "session_timeout_minutes"),
         "WHOLEMEM_SERVER_HOST": ("server", "host"),

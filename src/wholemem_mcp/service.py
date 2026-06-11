@@ -21,8 +21,7 @@ import aiosqlite
 
 from wholemem_mcp.config import WholeMemConfig, load_config
 from wholemem_mcp.daemon import run_daemon
-from wholemem_mcp.fs.blob_store import BlobStore
-from wholemem_mcp.fs.version_store import VersionStore
+from wholemem_mcp.fs.projects import ProjectStores, StoreHandle, sessions_db_filename
 from wholemem_mcp.fs.watcher import WAWDWatcher
 from wholemem_mcp.memory import MemoryStore
 from wholemem_mcp.obsidian import ObsidianWriter
@@ -61,14 +60,11 @@ class WholeMemService:
         self.memory: MemoryStore | None = None
         self.obsidian: ObsidianWriter | None = None
         self.sp_process: ScreenpipeProcess | None = None
-        self.db: aiosqlite.Connection | None = None
-        self.blob_store: BlobStore | None = None
-        self.version_store: VersionStore | None = None
+        self.projects: ProjectStores | None = None
+        self.sessions_db: aiosqlite.Connection | None = None
         self.session_tracker: SessionTracker | None = None
         self.watcher: WAWDWatcher | None = None
-        self.oracle: Oracle | None = None
         self.backend: OpenAICompatBackend | None = None
-        self.task_store: TaskStore | None = None
         self._daemon_task: asyncio.Task | None = None
 
     # ------------------------------------------------------------------
@@ -94,21 +90,36 @@ class WholeMemService:
         self.memory = MemoryStore(cfg)
         self.obsidian = ObsidianWriter(cfg.obsidian)
 
-        # --- Version store (SQLite + watchdog) ---
+        # --- Per-project version stores (SQLite + watchdog) ---
         if cfg.watcher.enabled:
-            db_path = _db_path_for_workspace(cfg)
-            self.db = await aiosqlite.connect(str(db_path))
+            ws_root = Path(cfg.watcher.path).expanduser().resolve()
+            db_dir = Path(cfg.versioning.db_path).expanduser()
 
-            self.blob_store = BlobStore(self.db, cfg.versioning.compression_level)
-            await self.blob_store.init_db()
-            self.version_store = VersionStore(self.db, self.blob_store)
-            await self.version_store.init_db()
+            legacy_db = _db_path_for_workspace(cfg)
+            if legacy_db.exists():
+                logger.warning(
+                    "Legacy monolithic DB found at %s — it is IGNORED by the "
+                    "per-project layout. Stop the service and run "
+                    "'wholemem-migrate --execute' to split it.",
+                    legacy_db,
+                )
+
+            self.projects = ProjectStores(
+                ws_root, db_dir,
+                compression_level=cfg.versioning.compression_level,
+                history_depth=cfg.versioning.history_depth,
+            )
+
+            # Sessions are global (agents span projects) — own shared DB
+            self.sessions_db = await aiosqlite.connect(
+                str(db_dir / sessions_db_filename(ws_root))
+            )
             self.session_tracker = SessionTracker(
-                self.db, cfg.oracle.session_timeout_minutes,
+                self.sessions_db, cfg.oracle.session_timeout_minutes,
             )
             await self.session_tracker.init_db()
 
-            # Oracle backend — reuses the LLM config
+            # Oracle backend — reuses the LLM config, shared by all projects
             self.backend = OpenAICompatBackend(
                 base_url=cfg.llm.base_url,
                 model=cfg.llm.model,
@@ -116,43 +127,19 @@ class WholeMemService:
                 timeout=300.0,
             )
 
-            context_builder = ContextBuilder(
-                self.version_store,
-                self.session_tracker,
-                cfg.oracle.history_depth,
-            )
-            restorer = Restorer(
-                self.version_store,
-                context_builder,
-                self.backend,
-                str(Path(cfg.watcher.path).expanduser()),
-            )
-            self.oracle = Oracle(
-                self.version_store,
-                self.session_tracker,
-                context_builder,
-                restorer,
-                self.backend,
-                str(Path(cfg.watcher.path).expanduser()),
-            )
-
-            # Start watcher
-            ws_path = str(Path(cfg.watcher.path).expanduser())
+            # Start watcher — routes each event to its project's store
             self.watcher = WAWDWatcher(
-                ws_path,
-                self.version_store,
-                cfg.watcher.exclude,
+                str(ws_root),
+                exclude=cfg.watcher.exclude,
                 session_tracker=self.session_tracker,
+                store_resolver=self.projects.store_for_rel,
             )
             await self.watcher.start()
-            self.oracle.set_watcher(self.watcher)
-            restorer.set_watcher(self.watcher)
 
-            logger.info("Watcher + oracle started for %s", ws_path)
-
-        # --- Task store ---
-        if cfg.watcher.enabled:
-            self.task_store = TaskStore(Path(cfg.watcher.path).expanduser())
+            logger.info(
+                "Watcher started for %s (projects: %s)",
+                ws_root, ", ".join(self.projects.known_projects()) or "none yet",
+            )
 
         # --- Background daemon ---
         self._daemon_task = asyncio.create_task(
@@ -162,11 +149,59 @@ class WholeMemService:
                 self.summarizer,
                 self.memory,
                 self.obsidian,
-                version_store=self.version_store,
+                version_store=self.projects,  # aggregate reader
+                project_stores=self.projects,
             )
         )
 
         logger.info("WholeMemService started.")
+
+    # ------------------------------------------------------------------
+    # Per-project runtimes
+    # ------------------------------------------------------------------
+
+    async def runtime_for(self, workspace: str | None) -> StoreHandle | None:
+        """Resolve a workspace path to its project's StoreHandle, with the
+        oracle/restorer/task_store wired in lazily.
+
+        The watch root itself (or a missing workspace) maps to the catch-all
+        ``_root`` project.
+        """
+        if self.projects is None:
+            return None
+        project = self.projects.project_for_workspace(workspace)
+        if project is None:
+            project = "_root"
+        handle = await self.projects.get(project)
+
+        if "oracle" not in handle.runtime:
+            cfg = self.config
+            context_builder = ContextBuilder(
+                handle.version_store,
+                self.session_tracker,
+                cfg.oracle.history_depth,
+            )
+            restorer = Restorer(
+                handle.version_store,
+                context_builder,
+                self.backend,
+                str(handle.path),
+            )
+            oracle = Oracle(
+                handle.version_store,
+                self.session_tracker,
+                context_builder,
+                restorer,
+                self.backend,
+                str(handle.path),
+            )
+            if self.watcher:
+                oracle.set_watcher(self.watcher)
+                restorer.set_watcher(self.watcher)
+            handle.runtime["oracle"] = oracle
+            handle.runtime["restorer"] = restorer
+            handle.runtime["task_store"] = TaskStore(handle.path)
+        return handle
 
     async def stop(self) -> None:
         """Tear down all components. Each step is isolated so failures
@@ -213,12 +248,17 @@ class WholeMemService:
             except Exception:
                 logger.exception("Error closing memory store")
 
-        # 6. Close SQLite
-        if self.db:
+        # 6. Close SQLite (all project stores + sessions DB)
+        if self.projects:
             try:
-                await self.db.close()
+                await self.projects.close_all()
             except Exception:
-                logger.exception("Error closing database")
+                logger.exception("Error closing project stores")
+        if self.sessions_db:
+            try:
+                await self.sessions_db.close()
+            except Exception:
+                logger.exception("Error closing sessions database")
 
         # 7. Stop managed Screenpipe
         if self.sp_process is not None:
@@ -264,6 +304,11 @@ class WholeMemService:
         # Watcher
         result["watcher"] = {"enabled": self.config.watcher.enabled, "path": self.config.watcher.path}
 
+        # Projects
+        result["projects"] = {
+            "known": self.projects.known_projects() if self.projects else [],
+        }
+
         # Sessions
         if self.session_tracker:
             try:
@@ -291,20 +336,21 @@ class WholeMemService:
     # ------------------------------------------------------------------
 
     def context_dict(self) -> Dict[str, Any]:
-        """Return the context dict that MCP tool handlers expect."""
+        """Return the context dict that MCP tool handlers expect.
+
+        ``version_store`` is the cross-project aggregate reader; per-project
+        stores and oracles are resolved via ``service.runtime_for()``.
+        """
         return {
             "config": self.config,
+            "service": self,
             "screenpipe": self.screenpipe_client,
             "summarizer": self.summarizer,
             "memory": self.memory,
             "obsidian": self.obsidian,
             "daemon_task": self._daemon_task,
-            "db": self.db,
-            "blob_store": self.blob_store,
-            "version_store": self.version_store,
+            "version_store": self.projects,  # aggregate reads
             "session_tracker": self.session_tracker,
             "watcher": self.watcher,
-            "oracle": self.oracle,
             "backend": self.backend,
-            "task_store": self.task_store,
         }
