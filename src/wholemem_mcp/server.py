@@ -33,6 +33,7 @@ from mcp.server.fastmcp import FastMCP
 
 from wholemem_mcp.config import WholeMemConfig, load_config
 from wholemem_mcp.service import WholeMemService
+from wholemem_mcp.anythingllm_dispatch import register_anythingllm_tools
 
 # ---------------------------------------------------------------------------
 # Logging — stderr only (stdio transport reserves stdout)
@@ -69,15 +70,43 @@ async def _mcp_lifespan(server: FastMCP) -> AsyncIterator[Dict[str, Any]]:
     yield _svc().context_dict()
 
 
+async def _scoped_store(svc: WholeMemService, workspace: Optional[str]):
+    """Resolve (reader, project) for a workspace.
+
+    The watch root (or no workspace) yields the cross-project aggregate
+    reader and project=None; a project workspace yields that project's
+    own version store.
+    """
+    if svc.projects is None:
+        return None, None
+    project = svc.projects.project_for_workspace(workspace)
+    if project is None:
+        return svc.projects, None
+    handle = await svc.projects.get(project)
+    return handle.version_store, project
+
+
+def _root_relative(path: Optional[str], project: Optional[str]) -> Optional[str]:
+    """Paths are stored relative to the watch root. Callers passing a
+    project workspace may give project-relative paths — normalise."""
+    if path is None or project is None:
+        return path
+    norm = path.replace("\\", "/").lstrip("/")
+    if norm == project or norm.startswith(project + "/"):
+        return norm
+    return f"{project}/{norm}"
+
+
 # ---------------------------------------------------------------------------
 # Server instance
 # ---------------------------------------------------------------------------
 
 mcp = FastMCP("wholemem_mcp", lifespan=_mcp_lifespan)
+register_anythingllm_tools(mcp)
 
 
 # ---------------------------------------------------------------------------
-# Custom HTTP routes (not MCP — accessed by UI and health checks)
+# Custom HTTP routes
 # ---------------------------------------------------------------------------
 
 @mcp.custom_route("/health", methods=["GET"])
@@ -133,21 +162,25 @@ async def api_briefing(request: Request) -> Response:
     workspace = body.get("workspace", str(Path(svc.config.watcher.path).expanduser()))
     query = body.get("query")
 
+    rt = await svc.runtime_for(workspace)
+    oracle_obj = rt.runtime.get("oracle") if rt else None
+    task_store = rt.runtime.get("task_store") if rt else None
+
     parts: list[str] = []
 
     # Oracle briefing
-    if svc.oracle:
+    if oracle_obj:
         try:
-            result = await svc.oracle.briefing(agent_name="ui", task=query, focus=query)
+            result = await oracle_obj.briefing(agent_name="ui", task=query, focus=query)
             parts.append(result["briefing"])
         except Exception as exc:
             logger.warning("Oracle briefing failed: %s", exc)
             parts.append("[Oracle unavailable]")
 
     # Open tasks
-    if svc.task_store:
+    if task_store:
         try:
-            tasks = svc.task_store.get_tasks()
+            tasks = task_store.get_tasks()
             if tasks:
                 task_lines = ["## Open Tasks"]
                 for t in tasks:
@@ -187,15 +220,18 @@ async def api_fix(request: Request) -> Response:
 
     description = body.get("description", "")
     dry_run = body.get("dry_run", True)
+    workspace = body.get("workspace")
 
     if not description:
         return JSONResponse({"error": "description is required"}, status_code=400)
 
-    if svc.oracle is None:
+    rt = await svc.runtime_for(workspace)
+    oracle_obj = rt.runtime.get("oracle") if rt else None
+    if oracle_obj is None:
         return JSONResponse({"error": "Watcher/oracle not enabled"}, status_code=503)
 
     try:
-        result = await svc.oracle.fix(problem=description, dry_run=dry_run)
+        result = await oracle_obj.fix(problem=description, dry_run=dry_run)
     except Exception as exc:
         return JSONResponse({"error": str(exc)}, status_code=500)
 
@@ -239,9 +275,12 @@ async def what_are_we_doing(
         depth: 'brief' (200-400 words) or 'full'.
     """
     ctx = mcp.get_context().request_context.lifespan_context
-    oracle_obj = ctx["oracle"]
+    svc: WholeMemService = ctx["service"]
     memory = ctx["memory"]
-    task_store = ctx["task_store"]
+
+    rt = await svc.runtime_for(workspace)
+    oracle_obj = rt.runtime.get("oracle") if rt else None
+    task_store = rt.runtime.get("task_store") if rt else None
 
     parts: list[str] = []
 
@@ -312,12 +351,14 @@ async def what_happened(
         limit: Max versions to return (1-100, default 20).
     """
     ctx = mcp.get_context().request_context.lifespan_context
-    version_store = ctx["version_store"]
+    svc: WholeMemService = ctx["service"]
 
+    version_store, project = await _scoped_store(svc, workspace)
     if version_store is None:
         return json.dumps({"error": "Watcher not enabled"})
 
     since = time.time() - (minutes * 60)
+    path = _root_relative(path, project)
 
     if path:
         entries = await version_store.get_history(
@@ -368,10 +409,11 @@ async def what_did_we_do(
         focus: Topic filter for the narrative.
     """
     ctx = mcp.get_context().request_context.lifespan_context
+    svc: WholeMemService = ctx["service"]
     screenpipe = ctx["screenpipe"]
     summarizer = ctx["summarizer"]
     memory = ctx["memory"]
-    version_store = ctx["version_store"]
+    version_store, _project = await _scoped_store(svc, workspace)
 
     sources: list[str] = []
 
@@ -448,8 +490,11 @@ async def fix_this(
         dry_run: If true, show plan without executing.
     """
     ctx = mcp.get_context().request_context.lifespan_context
-    oracle_obj = ctx["oracle"]
-    task_store = ctx["task_store"]
+    svc: WholeMemService = ctx["service"]
+
+    rt = await svc.runtime_for(workspace)
+    oracle_obj = rt.runtime.get("oracle") if rt else None
+    task_store = rt.runtime.get("task_store") if rt else None
 
     if oracle_obj is None:
         return "Error: Watcher/oracle not enabled. Cannot restore files."
@@ -506,9 +551,11 @@ async def we_did_this(
         append_note: Append to today's daily note.
     """
     ctx = mcp.get_context().request_context.lifespan_context
+    svc: WholeMemService = ctx["service"]
     memory = ctx["memory"]
     obsidian = ctx["obsidian"]
-    task_store_obj = ctx["task_store"]
+    rt = await svc.runtime_for(workspace) if workspace else None
+    task_store_obj = rt.runtime.get("task_store") if rt else None
 
     confirmations: list[str] = []
 
@@ -579,8 +626,12 @@ async def remember_this(
         metadata["category"] = category
 
     try:
-        result = memory.add(content=content, metadata=metadata)
+        # infer=False: explicit memories are stored verbatim — small local
+        # extraction models often drop long technical content as "no facts"
+        result = memory.add(content=content, metadata=metadata, infer=False)
         ids = [r.get("id", "?") for r in result.get("results", [])]
+        if not ids:
+            return "Memory write returned no IDs — content may not have been stored"
         return f"Stored (IDs: {', '.join(ids)})"
     except Exception as exc:
         return f"Memory write failed: {exc}"
