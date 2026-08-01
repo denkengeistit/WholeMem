@@ -26,7 +26,7 @@ DUE_DATE = re.compile(r"📅\s*(\d{4}-\d{2}-\d{2})")
 DONE_DATE = re.compile(r"✅\s*(\d{4}-\d{2}-\d{2})")
 ASSIGNEE = re.compile(r"\[assignee::\s*([^\]]+)\]")
 STATUS = re.compile(r"\[status::\s*([^\]]+)\]")
-TASK_ID = re.compile(r"(?:\U0001F194\s*([\w]+)|\[id::\s*([^\]]+)\])")
+TASK_ID = re.compile(r"(?:\U0001F194\s*([\w-]+)|\[id::\s*([^\]]+)\])")
 DEPENDS_ON = re.compile(r"(?:⛔\s*([\w,]+)|\[dependsOn::\s*([^\]]+)\])")
 
 
@@ -235,7 +235,7 @@ class TaskStore:
             task_line += f" 📅 {due_date}"
         if assignee:
             task_line += f" [assignee:: {assignee}]"
-        
+
         # Append to file
         if self._tasks_file.exists():
             content = self._tasks_file.read_text()
@@ -244,6 +244,145 @@ class TaskStore:
             content += task_line + "\n"
         else:
             content = task_line + "\n"
-        
+
         self._tasks_file.write_text(content)
         log.info("Added task: %s", text[:50])
+
+    def add_task_with_id(
+        self,
+        text: str,
+        task_id: str,
+        due_date: str | None = None,
+        assignee: str | None = None,
+        status: str = "pending",
+    ) -> None:
+        """Append a new task with a specific 🆔 ID.
+
+        Args:
+            text: Task text (will have ID appended).
+            task_id: The 🆔 ID to assign.
+            due_date: Optional due date YYYY-MM-DD.
+            assignee: Optional assignee name.
+            status: Initial status (default: pending).
+        """
+        # Build task line with ID
+        task_text = text
+        if not TASK_ID.search(task_text):
+            task_text += f" 🆔 {task_id}"
+        if due_date and not DUE_DATE.search(task_text):
+            # Insert due date before ID
+            task_text = task_text.replace(f" 🆔 {task_id}", f" 📅 {due_date} 🆔 {task_id}")
+        if assignee and not ASSIGNEE.search(task_text):
+            task_text += f" [assignee:: {assignee}]"
+        if status and not STATUS.search(task_text):
+            task_text += f" [status:: {status}]"
+
+        task_line = f"- [ ] {task_text}"
+
+        # Append to file
+        if self._tasks_file.exists():
+            content = self._tasks_file.read_text()
+            if not content.endswith("\n"):
+                content += "\n"
+            content += task_line + "\n"
+        else:
+            content = task_line + "\n"
+
+        self._tasks_file.write_text(content)
+        log.info("Added task with ID %s: %s", task_id, text[:50])
+
+    def update_task_status(self, line_num: int, status: str) -> None:
+        """Update the [status::] field of a task.
+
+        Args:
+            line_num: Line number of the task.
+            status: New status value (pending, in-progress, etc.).
+        """
+        if not self._tasks_file.exists():
+            raise FileNotFoundError(f"TASKS.md not found at {self._tasks_file}")
+
+        lines = self._tasks_file.read_text().splitlines()
+        if line_num < 1 or line_num > len(lines):
+            raise ValueError(f"Line {line_num} out of range")
+
+        line = lines[line_num - 1]
+        task = _parse_task_line(line, line_num)
+        if task is None:
+            raise ValueError(f"Line {line_num} is not a valid task")
+
+        # Remove existing [status::] and add new one
+        text = task.text
+        text = STATUS.sub("", text).strip()
+        text += f" [status:: {status}]"
+
+        new_line = f"{task.indent}- [{'x' if task.checked else ' '}] {text}"
+        lines[line_num - 1] = new_line
+
+        self._tasks_file.write_text("\n".join(lines) + "\n")
+        log.info("Updated status on line %d to %s", line_num, status)
+
+    def update_task_metadata(
+        self,
+        line_num: int,
+        description: str | None = None,
+        due_date: str | None = None,
+        assignee: str | None = None,
+    ) -> None:
+        """Update metadata fields on a task line.
+
+        Args:
+            line_num: Line number of the task.
+            description: New description (replaces text after first space).
+            due_date: New due date YYYY-MM-DD.
+            assignee: New assignee name.
+        """
+        if not self._tasks_file.exists():
+            raise FileNotFoundError(f"TASKS.md not found at {self._tasks_file}")
+
+        lines = self._tasks_file.read_text().splitlines()
+        if line_num < 1 or line_num > len(lines):
+            raise ValueError(f"Line {line_num} out of range")
+
+        line = lines[line_num - 1]
+        task = _parse_task_line(line, line_num)
+        if task is None:
+            raise ValueError(f"Line {line_num} is not a valid task")
+
+        text = task.text
+
+        # Update description (everything after 🆔)
+        if description:
+            # Find the task ID marker and replace text before it
+            id_match = TASK_ID.search(text)
+            if id_match:
+                id_pos = id_match.start()
+                id_part = text[id_pos:]
+                text = description + " " + id_part
+            else:
+                # Add ID if not present
+                text = description
+
+        # Update due date
+        if due_date:
+            text = DUE_DATE.sub("", text).strip()
+            # Insert after description, before ID
+            id_match = TASK_ID.search(text)
+            if id_match:
+                id_pos = id_match.start()
+                text = text[:id_pos].strip() + f" 📅 {due_date} " + text[id_pos:]
+            else:
+                text += f" 📅 {due_date}"
+        elif DUE_DATE.search(text):
+            # Keep existing due date
+            pass
+
+        # Update assignee
+        if assignee:
+            text = ASSIGNEE.sub("", text).strip()
+            text += f" [assignee:: {assignee}]"
+
+        new_line = f"{task.indent}- [{'x' if task.checked else ' '}] {text}"
+        lines[line_num - 1] = new_line
+
+        self._tasks_file.write_text("\n".join(lines) + "\n")
+        log.info("Updated metadata on line %d", line_num)

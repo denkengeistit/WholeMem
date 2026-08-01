@@ -34,6 +34,8 @@ from mcp.server.fastmcp import FastMCP
 from wholemem_mcp.config import WholeMemConfig, load_config
 from wholemem_mcp.service import WholeMemService
 from wholemem_mcp.anythingllm_dispatch import register_anythingllm_tools
+from wholemem_mcp.get_help import register_get_help_tools
+from wholemem_mcp.task_manager import register_task_manager_tools
 
 # ---------------------------------------------------------------------------
 # Logging — stderr only (stdio transport reserves stdout)
@@ -103,6 +105,8 @@ def _root_relative(path: Optional[str], project: Optional[str]) -> Optional[str]
 
 mcp = FastMCP("wholemem_mcp", lifespan=_mcp_lifespan)
 register_anythingllm_tools(mcp)
+register_get_help_tools(mcp)
+register_task_manager_tools(mcp)
 
 
 # ---------------------------------------------------------------------------
