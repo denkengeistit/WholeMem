@@ -5,6 +5,7 @@ Minimal artifact ledger stripped from WholeMem: just the file watcher and a SQLi
 - Watches `~/tasks/<card>/` (one workdir per Vikunja card) with watchdog/inotify.
 - Records create/write/delete per file, with deduplicated zlib-compressed content, the card id from the path, and the agent from the dispatcher's run record.
 - Read-only queries: `ledger.py log [card]`, `ledger.py diff <id>`, `ledger.py show <id>`.
+- `ledger.py restore <id>` (CLI only, never over MCP) puts a file back; the restore is logged as a new change, so it can be undone.
 - `ledger.py mcp` is a read-only stdio MCP server (ledger_log, ledger_diff, ledger_show) for ZeroClaw, which interprets the ledger (the old Oracle role).
 
-No Screenpipe, mem0, Obsidian, UI, or restore tool. The full original is on `main`.
+No Screenpipe, mem0, Obsidian, or UI. The full original is on `main`.

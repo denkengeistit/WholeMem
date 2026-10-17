@@ -9,9 +9,11 @@ content, so anyone can ask what an agent actually changed.
   ledger.py log [card] [--since H] [--limit N]   recent changes as JSON
   ledger.py diff <change_id>           unified diff vs the previous version
   ledger.py show <change_id>           file content at that change
+  ledger.py restore <change_id>        put the file back as it was at that change (CLI only)
   ledger.py mcp                        read-only stdio MCP server (for ZeroClaw)
 
-Readers open the DB read-only. Restoring is deliberately not a tool: copy `show` output by hand.
+Readers open the DB read-only. restore is CLI only and never exposed over MCP; the
+watcher logs the restore as a new change, so a restore can itself be undone.
 """
 import difflib, hashlib, json, os, sqlite3, sys, threading, time, zlib
 
@@ -50,7 +52,7 @@ def split(abs_path):
     parts = rel.split(os.sep)
     if len(parts) < 2 or not parts[0].isdigit() or any(p in SKIP_DIRS for p in parts[:-1]):
         return None
-    if parts[-1].endswith((".swp", ".tmp", "~")) or parts[-1].startswith(".#"):
+    if parts[-1].endswith((".swp", ".tmp", "~", ".ledger-restore")) or parts[-1].startswith(".#"):
         return None
     return int(parts[0]), os.sep.join(parts[1:])
 
@@ -165,6 +167,26 @@ def q_show(cid):
     return "(file over 2 MB, not stored)" if b is None else b.decode("utf-8", "replace")
 
 
+def restore(cid):
+    db = ro(); card, path, sha, op = q_row(db, cid)
+    dest = os.path.realpath(os.path.join(ROOT, str(card), path))
+    if not dest.startswith(os.path.realpath(os.path.join(ROOT, str(card))) + os.sep):
+        raise ValueError("path escapes card workdir")
+    if op == "delete":
+        if os.path.exists(dest):
+            os.remove(dest)
+        return f"removed {dest} (state at change {cid} was deleted)"
+    b = blob(db, sha)
+    if b is None:
+        raise ValueError("content not stored (file over 2 MB)")
+    os.makedirs(os.path.dirname(dest), exist_ok=True)
+    tmp = dest + ".ledger-restore"
+    with open(tmp, "wb") as f:
+        f.write(b)
+    os.replace(tmp, dest)
+    return f"restored {dest} to change {cid} ({len(b)} bytes)"
+
+
 def q_diff(cid):
     db = ro(); card, path, sha, op = q_row(db, cid)
     prev = db.execute("SELECT sha FROM changes WHERE card=? AND path=? AND id<? ORDER BY id DESC LIMIT 1",
@@ -240,6 +262,8 @@ def main(a):
         print(q_diff(a[1]))
     elif cmd == "show":
         print(q_show(a[1]))
+    elif cmd == "restore":
+        print(restore(a[1]))
     else:
         print(__doc__)
 
