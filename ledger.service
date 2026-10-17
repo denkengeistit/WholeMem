@@ -1,0 +1,12 @@
+[Unit]
+Description=Artifact ledger (watches ~/tasks card workdirs)
+After=network.target
+
+[Service]
+User=hark
+ExecStart=/home/hark/ledger/.venv/bin/python /home/hark/ledger/ledger.py watch
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

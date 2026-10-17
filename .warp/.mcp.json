@@ -1,7 +1,0 @@
-{
-  "mcpServers": {
-    "wholemem": {
-      "url": "http://localhost:8767/mcp"
-    }
-  }
-}
